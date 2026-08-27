@@ -35,9 +35,42 @@ class RunPodClient:
             },
             timeout=timeout,
         )
+        self._management_client = httpx.Client(
+            base_url=settings.management_api_base_url,
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+        )
 
     def close(self) -> None:
         self._client.close()
+        self._management_client.close()
+
+    def set_workers_max(self, workers_max: int) -> None:
+        """Explicit endpoint gate used as a cost guard around private jobs."""
+        if workers_max not in {0, 1}:
+            raise ValueError("private endpoint workers_max must be 0 or 1")
+        try:
+            response = self._management_client.patch(
+                f"/endpoints/{self.settings.endpoint_id}",
+                json={"workersMax": workers_max, "workersMin": 0},
+            )
+        except httpx.HTTPError as exc:
+            raise RunPodError(
+                "云 GPU 成本控制接口连接失败", error={"message": str(exc)}
+            ) from exc
+        if response.is_error:
+            try:
+                error = response.json().get("error", response.json())
+            except ValueError:
+                error = f"HTTP {response.status_code}"
+            raise RunPodError(
+                f"RunPod endpoint update returned HTTP {response.status_code}",
+                status_code=response.status_code,
+                error=error,
+            )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
@@ -85,9 +118,17 @@ class RunPodClient:
                 "duration": options.get("duration", 6),
             },
         }
-        # RunPod's per-job TTL query value is milliseconds. Execution timeout is
-        # configured on the endpoint so queue policy remains an infrastructure concern.
-        return self._normalize(self._request("POST", "/run?ttl=7200000", json=payload))
+        # Keep the endpoint hard-disabled between jobs because RunPod's idle scaler
+        # has occasionally left this private worker allocated. A failed submission
+        # closes the gate immediately; successful jobs are closed by the web guard.
+        self.set_workers_max(1)
+        try:
+            # RunPod's per-job TTL query value is milliseconds. Execution timeout is
+            # configured on the endpoint so queue policy remains an infrastructure concern.
+            return self._normalize(self._request("POST", "/run?ttl=7200000", json=payload))
+        except Exception:
+            self.set_workers_max(0)
+            raise
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         return self._normalize(self._request("GET", f"/status/{task_id}"))

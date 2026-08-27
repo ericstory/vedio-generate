@@ -4,7 +4,14 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from ai_vedio import web
-from ai_vedio.web import TaskStore, WebSettings, _sign_session, _valid_session, create_app
+from ai_vedio.web import (
+    TaskStore,
+    WebSettings,
+    _runpod_cost_guard_tick,
+    _sign_session,
+    _valid_session,
+    create_app,
+)
 from ai_vedio.web import _generation_error
 from ai_vedio.seedance import SeedanceError
 
@@ -112,6 +119,59 @@ def test_task_store_orders_newest_first(tmp_path: Path) -> None:
     store.create({**base, "id": "one", "created_at": "2026-01-01T00:00:00+00:00"})
     store.create({**base, "id": "two", "created_at": "2026-01-02T00:00:00+00:00"})
     assert [task["id"] for task in store.list()] == ["two", "one"]
+
+
+def test_cost_guard_persists_terminal_task_and_closes_gpu_gate(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    store.create(
+        {
+            "id": "local-one",
+            "provider": "runpod",
+            "provider_task_id": "remote-one",
+            "prompt": "测试",
+            "model": "pinkcherry-ltx-2.3-v1.8",
+            "ratio": "16:9",
+            "resolution": "480p",
+            "duration": 4,
+            "has_reference": 0,
+            "status": "processing",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+
+    class FakeRunPod:
+        workers_max = []
+
+        def get_task(self, task_id: str):
+            assert task_id == "remote-one"
+            return {
+                "status": "succeeded",
+                "content": {"video_url": "/generate/media/result.mp4"},
+                "error": None,
+            }
+
+        def set_workers_max(self, value: int):
+            self.workers_max.append(value)
+
+        def close(self):
+            pass
+
+    fake = FakeRunPod()
+
+    def fake_client():
+        try:
+            yield fake
+        finally:
+            fake.close()
+
+    monkeypatch.setattr(web, "_runpod_client", fake_client)
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is False
+    task = store.get("local-one")
+    assert task and task["status"] == "succeeded"
+    assert task["video_url"] == "/generate/media/result.mp4"
+    assert fake.workers_max == [0]
 
 
 def test_generation_error_explains_real_person_assets() -> None:

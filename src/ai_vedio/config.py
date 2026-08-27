@@ -53,6 +53,7 @@ class RunPodSettings:
     api_key: str
     endpoint_id: str
     api_base_url: str = "https://api.runpod.ai/v2"
+    management_api_base_url: str = "https://rest.runpod.io/v1"
     model_id: str = "SexGod1979/PinkCherry_NSFW_LTX23"
     model_version: str = "PinkCherry_FineTune_bf16_v1_8_LTX23"
     workflow_version: str = "pinkcherry-native-two-stage-v1"
@@ -87,6 +88,9 @@ def load_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
         api_key=_required("RUNPOD_API_KEY"),
         endpoint_id=_required("RUNPOD_ENDPOINT_ID"),
         api_base_url=os.getenv("RUNPOD_API_BASE_URL", "https://api.runpod.ai/v2").rstrip("/"),
+        management_api_base_url=os.getenv(
+            "RUNPOD_MANAGEMENT_API_BASE_URL", "https://rest.runpod.io/v1"
+        ).rstrip("/"),
         model_id=os.getenv(
             "SELF_HOSTED_MODEL_ID", "SexGod1979/PinkCherry_NSFW_LTX23"
         ),

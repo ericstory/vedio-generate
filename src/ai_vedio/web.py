@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import base64
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -33,6 +34,7 @@ MAX_VIDEO_BYTES = 250 * 1024 * 1024
 ALLOWED_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
 ALLOWED_RESOLUTIONS = {"480p", "720p", "1080p"}
 ALLOWED_DURATIONS = set(range(4, 16))
+TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class WebSettings:
     cookie_domain: str | None = None
     video_upload_token: str = ""
     video_output_dir: Path | None = None
+    runpod_cost_guard_enabled: bool = False
+    runpod_cost_guard_poll_seconds: float = 8.0
 
 
 def load_web_settings() -> WebSettings:
@@ -78,6 +82,10 @@ def load_web_settings() -> WebSettings:
         cookie_domain=os.getenv("COOKIE_DOMAIN") or None,
         video_upload_token=os.getenv("VIDEO_UPLOAD_TOKEN", ""),
         video_output_dir=output_dir,
+        runpod_cost_guard_enabled=os.getenv("RUNPOD_COST_GUARD_ENABLED", "1") != "0",
+        runpod_cost_guard_poll_seconds=float(
+            os.getenv("RUNPOD_COST_GUARD_POLL_SECONDS", "8")
+        ),
     )
 
 
@@ -165,6 +173,17 @@ class TaskStore:
         with self.connect() as db:
             row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return _public_task(dict(row)) if row else None
+
+    def active_runpod(self) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""SELECT * FROM tasks
+                WHERE provider='runpod' AND status NOT IN ({placeholders})
+                ORDER BY created_at ASC""",
+                tuple(sorted(TERMINAL_STATUSES)),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def _now() -> str:
@@ -280,6 +299,23 @@ def _provider_client(provider: str) -> Iterator[SeedanceClient | RunPodClient]:
     return _client()
 
 
+def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool:
+    """Poll active private jobs and explicitly close the GPU gate at terminal state."""
+    active_before = store.active_runpod()
+    with suppress(SeedanceError, ValueError):
+        for client in _runpod_client():
+            for task in active_before:
+                remote_id = task.get("provider_task_id") or task["id"]
+                store.update_remote(task["id"], client.get_task(remote_id))
+            active_after = bool(store.active_runpod())
+            if not active_after and (shutdown_if_idle or bool(active_before)):
+                client.set_workers_max(0)
+            return active_after
+    # On a provider outage, retain the prior active state and never shut down a
+    # worker that may still be processing a job.
+    return bool(active_before)
+
+
 def create_app(web_settings: WebSettings | None = None) -> FastAPI:
     settings = web_settings or load_web_settings()
 
@@ -292,7 +328,27 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             or settings.database_path.parent / "generated-videos"
         )
         app.state.video_output_dir.mkdir(parents=True, exist_ok=True)
-        yield
+        guard_task: asyncio.Task[None] | None = None
+        if settings.runpod_cost_guard_enabled:
+            async def guard_loop() -> None:
+                shutdown_if_idle = True
+                while True:
+                    active = await asyncio.to_thread(
+                        _runpod_cost_guard_tick,
+                        app.state.store,
+                        shutdown_if_idle=shutdown_if_idle,
+                    )
+                    shutdown_if_idle = active
+                    await asyncio.sleep(settings.runpod_cost_guard_poll_seconds)
+
+            guard_task = asyncio.create_task(guard_loop())
+        try:
+            yield
+        finally:
+            if guard_task is not None:
+                guard_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await guard_task
 
     app = FastAPI(title="AI 视频生成", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.mount(f"{settings.base_path}/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
@@ -419,7 +475,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         _require_auth(request)
         store: TaskStore = request.app.state.store
         tasks = store.list()
-        active = [task for task in tasks if task["status"] not in {"succeeded", "failed", "cancelled", "expired"}]
+        active = [task for task in tasks if task["status"] not in TERMINAL_STATUSES]
         if active:
             for task in active[:10]:
                 try:
@@ -452,6 +508,12 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         if ratio not in ALLOWED_RATIOS or resolution not in ALLOWED_RESOLUTIONS or duration not in ALLOWED_DURATIONS:
             raise HTTPException(status_code=422, detail="视频参数不受支持")
         is_self_hosted = model in SELF_HOSTED_MODELS
+        store: TaskStore = request.app.state.store
+        if is_self_hosted and store.active_runpod():
+            raise HTTPException(
+                status_code=429,
+                detail="自建 GPU 当前已有任务，请等待完成后再提交",
+            )
         if is_self_hosted and resolution == "1080p":
             raise HTTPException(status_code=422, detail="自建模型首版仅支持 480p 或 720p")
         if is_self_hosted and reference and reference.filename:
@@ -502,7 +564,6 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             "status": str(remote.get("status") or "queued"),
             "created_at": created_at,
         }
-        store: TaskStore = request.app.state.store
         store.create(task)
         return {"task": store.get(task_id)}
 

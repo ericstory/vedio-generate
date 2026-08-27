@@ -78,6 +78,11 @@ internal endpoint under `APP_BASE_PATH`. Railway writes it to the existing persi
 only serves it to a valid admin session. Configure the same `VIDEO_UPLOAD_TOKEN` on Railway and in
 the RunPod worker template; do not expose this token to frontend code.
 
+Railway also acts as a cost guard for the private RunPod endpoint. It keeps `workersMax=0` while
+idle, opens the endpoint to one worker immediately before submitting a self-hosted job, polls that
+job in the background, and restores `workersMax=0` after a terminal result. Keep
+`RUNPOD_COST_GUARD_ENABLED=1`; only one self-hosted job may be active at a time.
+
 本地启动：
 
 ```bash
