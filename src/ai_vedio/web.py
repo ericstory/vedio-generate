@@ -17,6 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .capabilities import SUPPORTED_MODELS
 from .config import PROJECT_ROOT, load_settings
 from .seedance import SeedanceClient, SeedanceError
 
@@ -353,6 +354,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         prompt = prompt.strip()
         if not prompt or len(prompt) > 3000:
             raise HTTPException(status_code=422, detail="提示词长度应为 1–3000 个字符")
+        if model not in SUPPORTED_MODELS:
+            raise HTTPException(status_code=422, detail="生成模型不受支持")
         if ratio not in ALLOWED_RATIOS or resolution not in ALLOWED_RESOLUTIONS or duration not in ALLOWED_DURATIONS:
             raise HTTPException(status_code=422, detail="视频参数不受支持")
         image_data_url = None

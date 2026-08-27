@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from ai_vedio import web
 from ai_vedio.web import TaskStore, WebSettings, _sign_session, _valid_session, create_app
 from ai_vedio.web import _generation_error
 from ai_vedio.seedance import SeedanceError
@@ -99,3 +100,24 @@ def test_generation_error_explains_moderation() -> None:
     response = _generation_error(error)
     assert response.status_code == 422
     assert "内容安全审核未通过" in response.body.decode("utf-8")
+
+
+def test_task_creation_rejects_unknown_model_before_calling_provider(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    def provider_must_not_be_called():
+        raise AssertionError("provider should not be called for an unsupported model")
+
+    monkeypatch.setattr(web, "_client", provider_must_not_be_called)
+    app = create_app(web_settings(tmp_path))
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        response = client.post(
+            "/generate/api/tasks",
+            data={"prompt": "测试视频", "model": "unknown-model"},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "生成模型不受支持"

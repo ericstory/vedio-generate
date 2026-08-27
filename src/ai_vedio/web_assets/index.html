@@ -48,6 +48,12 @@
           <p><b>真人参考图需要预先验证</b><small>包含可识别人脸的图片不能直接上传，请先加入 BytePlus 受信任素材库；普通物品、场景或插画可直接使用。</small></p>
         </div>
         <div class="composer-bar">
+          <div class="control-group model-control"><span class="control-label">模型</span><select name="model" id="model" aria-label="生成模型">
+            <option value="seedance-2.5">Seedance 2.5</option>
+            <option value="seedance-2-mini">Seedance 2.0 Mini</option>
+            <option value="seedance-2-fast">Seedance 2.0 Fast</option>
+            <option value="seedance-2.0" selected>Seedance 2.0</option>
+          </select></div>
           <label class="upload-button" title="添加参考图片">
             <input id="reference" name="reference" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic">
             <span>⊕</span> 参考图
@@ -60,7 +66,6 @@
           <div class="control-group"><span class="control-label">清晰度</span><select name="resolution"><option>480p</option><option selected>720p</option><option>1080p</option></select></div>
           <div class="control-group"><span class="control-label">时长</span><select name="duration"><option value="4">4 秒</option><option value="6" selected>6 秒</option><option value="8">8 秒</option><option value="10">10 秒</option><option value="12">12 秒</option><option value="15">15 秒</option></select></div>
           <label class="audio-toggle"><input type="checkbox" name="generate_audio" checked><span></span> 音效</label>
-          <input type="hidden" name="model" value="seedance-2.0">
           <button id="submit-button" class="generate-button" type="submit"><span>✦</span> 开始生成</button>
         </div>
         <div class="composer-meta"><span id="char-count">0 / 3000</span><span>支持中文与英文描述</span></div>

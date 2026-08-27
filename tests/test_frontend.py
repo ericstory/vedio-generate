@@ -23,3 +23,13 @@ def test_frontend_displays_structured_generation_errors() -> None:
     assert "upstream_message" in script
     assert 'id="error-guidance"' in markup
     assert 'id="reference-guide"' in markup
+
+
+def test_frontend_exposes_all_supported_models() -> None:
+    markup = (
+        Path(__file__).parents[1] / "src" / "ai_vedio" / "web_assets" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert 'select name="model" id="model"' in markup
+    assert 'type="hidden" name="model"' not in markup
+    for model in ("seedance-2.5", "seedance-2-mini", "seedance-2-fast", "seedance-2.0"):
+        assert f'value="{model}"' in markup

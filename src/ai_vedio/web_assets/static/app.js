@@ -5,6 +5,12 @@ const statusMap = {
   running: ['生成中', 'running'], succeeded: ['已完成', 'success'], failed: ['失败', 'failed'],
   cancelled: ['已取消', 'failed'], expired: ['已过期', 'failed']
 };
+const modelNames = {
+  'seedance-2.5': 'Seedance 2.5',
+  'seedance-2-mini': 'Seedance 2.0 Mini',
+  'seedance-2-fast': 'Seedance 2.0 Fast',
+  'seedance-2.0': 'Seedance 2.0'
+};
 
 function escapeHtml(value='') {
   const node = document.createElement('span'); node.textContent = value; return node.innerHTML;
@@ -55,7 +61,7 @@ function renderTasks() {
     const [label, kind] = statusInfo(task.status);
     return `<button class="task-item ${state.selected===task.id?'selected':''}" data-id="${task.id}">
       <span class="task-thumb ${kind}">${kind==='running'?'<i class="mini-loader"></i>':kind==='success'?'▶':'✦'}</span>
-      <span class="task-copy"><b>${escapeHtml(task.prompt)}</b><small>${relativeTime(task.created_at)} · ${task.duration}s · ${task.ratio}</small></span>
+      <span class="task-copy"><b>${escapeHtml(task.prompt)}</b><small>${relativeTime(task.created_at)} · ${escapeHtml(modelNames[task.model] || task.model)} · ${task.duration}s · ${task.ratio}</small></span>
       <span class="task-status ${kind}">${label}</span></button>`;
   }).join('');
   list.querySelectorAll('.task-item').forEach(el => el.addEventListener('click', () => openTask(el.dataset.id)));
@@ -74,7 +80,7 @@ function renderDetail(task) {
   if (!task) return; const [label, kind]=statusInfo(task.status);
   $('#detail-status').textContent=label; $('#detail-status').className=`status-pill ${kind}`;
   $('#detail-title').textContent=task.prompt;
-  $('#detail-meta').innerHTML=`<span>${task.ratio}</span><span>${task.resolution}</span><span>${task.duration} 秒</span><span>${task.has_reference?'含参考图':'文生视频'}</span>`;
+  $('#detail-meta').innerHTML=`<span>${escapeHtml(modelNames[task.model] || task.model)}</span><span>${task.ratio}</span><span>${task.resolution}</span><span>${task.duration} 秒</span><span>${task.has_reference?'含参考图':'文生视频'}</span>`;
   $('#detail-error').textContent=task.error || '';
   const container=$('#result-video');
   if(task.status==='succeeded' && task.video_url) container.innerHTML=`<video controls autoplay muted playsinline src="${escapeHtml(task.video_url)}"></video><a class="download-link" href="${escapeHtml(task.video_url)}" target="_blank" rel="noopener">打开原视频 ↗</a>`;
