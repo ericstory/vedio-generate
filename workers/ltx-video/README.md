@@ -85,8 +85,8 @@ up to 250MB, so RunPod credentials never need to be exposed to the browser.
 `torch 2.13.0 + cu132`。RunPod 当前 Endpoint API 的 CUDA 筛选枚举最高为 13.0，因此基础设施
 使用 `min CUDA version=13.0`，并通过真实 GPU 推理验证主机驱动可以运行 cu132 镜像；不能仅凭
 容器健康检查假定 CUDA 兼容。
-镜像同时保留 `build-essential`，因为 PyTorch/Triton 会在第一次真实推理时编译一个小型
-CUDA driver shim；仅完成模型加载的健康检查不会触发这个编译步骤。
+镜像同时保留 `build-essential` 和 `python3.12-dev`，因为 PyTorch/Triton 会在第一次真实
+推理时编译一个 Python CUDA driver shim；仅完成模型加载的健康检查不会触发这个编译步骤。
 
 ## 付费边界
 

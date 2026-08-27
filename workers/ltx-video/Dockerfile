@@ -36,7 +36,8 @@ RUN uv pip install "httpx>=0.28,<1"
 # Keep this after the expensive Python dependency layer so CI can reuse its cache.
 ENV CC=/usr/bin/gcc \
     CXX=/usr/bin/g++
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential python3.12-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
