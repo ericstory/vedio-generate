@@ -44,7 +44,7 @@ def test_login_guards_generate_page(tmp_path: Path) -> None:
             json={"username": "admin", "password": "correct horse battery staple"},
         )
         assert response.status_code == 200
-        assert response.cookies.get("wd_video_session")
+        assert response.cookies.get("ai_video_session")
         page = client.get("/generate")
         assert page.status_code == 200
         assert '<base href="/generate/">' in page.text
@@ -58,7 +58,7 @@ def test_login_guards_generate_page(tmp_path: Path) -> None:
         )
         assert response.status_code == 303
         assert response.headers["location"] == "/generate"
-        assert response.cookies.get("wd_video_session")
+        assert response.cookies.get("ai_video_session")
 
 
 def test_task_store_orders_newest_first(tmp_path: Path) -> None:

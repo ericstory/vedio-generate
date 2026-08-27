@@ -23,7 +23,7 @@ from .seedance import SeedanceClient, SeedanceError
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 WEB_DIR = PACKAGE_DIR / "web_assets"
-SESSION_COOKIE = "wd_video_session"
+SESSION_COOKIE = "ai_video_session"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/heic"}
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 ALLOWED_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
@@ -243,7 +243,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         app.state.store = TaskStore(settings.database_path)
         yield
 
-    app = FastAPI(title="WhichDrama 视频生成", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="AI 视频生成", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.mount(f"{settings.base_path}/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 
     def html_page(name: str) -> HTMLResponse:
