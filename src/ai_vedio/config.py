@@ -48,6 +48,16 @@ class Settings:
             raise ValueError(f"Unknown Seedance model {model!r}; choose one of: {choices}") from exc
 
 
+@dataclass(frozen=True)
+class RunPodSettings:
+    api_key: str
+    endpoint_id: str
+    api_base_url: str = "https://api.runpod.ai/v2"
+    model_id: str = "SexGod1979/PinkCherry_NSFW_LTX23"
+    model_version: str = "PinkCherry_FineTune_bf16_v1_8_LTX23"
+    workflow_version: str = "pinkcherry-native-two-stage-v1"
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
     return Settings(
@@ -67,5 +77,23 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         asset_library_region=os.getenv("ASSET_LIBRARY_REGION", "ap-southeast-1"),
         asset_library_api_host=os.getenv(
             "ASSET_LIBRARY_API_HOST", "ark.ap-southeast-1.byteplusapi.com"
+        ),
+    )
+
+
+def load_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
+    _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    return RunPodSettings(
+        api_key=_required("RUNPOD_API_KEY"),
+        endpoint_id=_required("RUNPOD_ENDPOINT_ID"),
+        api_base_url=os.getenv("RUNPOD_API_BASE_URL", "https://api.runpod.ai/v2").rstrip("/"),
+        model_id=os.getenv(
+            "SELF_HOSTED_MODEL_ID", "SexGod1979/PinkCherry_NSFW_LTX23"
+        ),
+        model_version=os.getenv(
+            "SELF_HOSTED_MODEL_VERSION", "PinkCherry_FineTune_bf16_v1_8_LTX23"
+        ),
+        workflow_version=os.getenv(
+            "SELF_HOSTED_WORKFLOW_VERSION", "pinkcherry-native-two-stage-v1"
         ),
     )

@@ -1,0 +1,57 @@
+{
+  "policy_version": 1,
+  "minimum_vram_gb": 48,
+  "maximum_secure_price_usd_per_hour": 2.1,
+  "excluded_families": ["H100", "H200"],
+  "pricing_note": "RunPod Secure Cloud reference prices; live capacity and pricing must be checked before provisioning.",
+  "gpu_types": [
+    {
+      "id": "NVIDIA L40S",
+      "vram_gb": 48,
+      "secure_price_usd_per_hour": 0.99,
+      "quantization": "fp8-cast"
+    },
+    {
+      "id": "NVIDIA RTX 6000 Ada Generation",
+      "vram_gb": 48,
+      "secure_price_usd_per_hour": 0.84,
+      "quantization": "fp8-cast"
+    },
+    {
+      "id": "NVIDIA L40",
+      "vram_gb": 48,
+      "secure_price_usd_per_hour": 0.82,
+      "quantization": "fp8-cast"
+    },
+    {
+      "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
+      "vram_gb": 48,
+      "secure_price_usd_per_hour": 1.09,
+      "quantization": "fp8-cast"
+    },
+    {
+      "id": "NVIDIA A100 80GB PCIe",
+      "vram_gb": 80,
+      "secure_price_usd_per_hour": 1.39,
+      "quantization": "bf16"
+    },
+    {
+      "id": "NVIDIA A100-SXM4-80GB",
+      "vram_gb": 80,
+      "secure_price_usd_per_hour": 1.59,
+      "quantization": "bf16"
+    },
+    {
+      "id": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "vram_gb": 96,
+      "secure_price_usd_per_hour": 1.89,
+      "quantization": "fp8-cast"
+    },
+    {
+      "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "vram_gb": 96,
+      "secure_price_usd_per_hour": 2.09,
+      "quantization": "fp8-cast"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "layout_version": 1,
+  "expected_download_bytes": 79155298327,
+  "artifacts": [
+    {
+      "repo": "SexGod1979/PinkCherry_NSFW_LTX23",
+      "revision": "aa5e3192dacd58e8c807e4198e3fcecc53db9f80",
+      "path": "v1.8/PinkCherry_FineTune_bf16_v1_8_LTX23.safetensors",
+      "size": 46139885750,
+      "sha256": "c3fa92ab8a81c4a47b36f0fc85720b6d0c1181d0af9f22cda25c9334ceac3ca0"
+    },
+    {
+      "repo": "Lightricks/LTX-2.3",
+      "revision": "6b5a83e3045eaf8e46cfa0acce512412aa2b9cce",
+      "path": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "size": 7605507256,
+      "sha256": "f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a"
+    },
+    {
+      "repo": "Lightricks/LTX-2.3",
+      "revision": "6b5a83e3045eaf8e46cfa0acce512412aa2b9cce",
+      "path": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "size": 995743560,
+      "sha256": "5f416311fa8172b65af67530758964708d29a317b830d689a51143b7f91913ed"
+    },
+    {
+      "repo": "google/gemma-3-12b-it-qat-q4_0-unquantized",
+      "revision": "68f7ee4fbd59087436ada77ed2d62f373fdd4482",
+      "path": "*",
+      "size": 24414161761,
+      "sha256": null,
+      "note": "Gated repository; revision is pinned and hf verifies Hub/Xet objects."
+    }
+  ]
+}

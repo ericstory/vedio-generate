@@ -6,11 +6,13 @@ const statusMap = {
   cancelled: ['已取消', 'failed'], expired: ['已过期', 'failed']
 };
 const modelNames = {
+  'pinkcherry-ltx-2.3-v1.8': '自建 · PinkCherry LTX 2.3',
   'seedance-2.5': 'Seedance 2.5',
   'seedance-2-mini': 'Seedance 2.0 Mini',
   'seedance-2-fast': 'Seedance 2.0 Fast',
   'seedance-2.0': 'Seedance 2.0'
 };
+const selfHostedModels = new Set(['pinkcherry-ltx-2.3-v1.8']);
 
 function escapeHtml(value='') {
   const node = document.createElement('span'); node.textContent = value; return node.innerHTML;
@@ -90,13 +92,26 @@ function renderDetail(task) {
 function resetComposer() { state.selected=null; renderTasks(); $('#detail-view').hidden=true; $('#composer-view').hidden=false; closeSidebar(); $('#prompt').focus(); }
 function openSidebar(){ $('#sidebar').classList.add('open'); $('#sidebar-scrim').classList.add('open'); }
 function closeSidebar(){ $('#sidebar').classList.remove('open'); $('#sidebar-scrim').classList.remove('open'); }
+function syncModelCapabilities() {
+  const selfHosted=selfHostedModels.has($('#model').value);
+  const referenceControl=$('#reference-control'); const audio=$('#generate-audio');
+  referenceControl.classList.toggle('disabled', selfHosted);
+  $('#reference').disabled=selfHosted;
+  if(selfHosted){ clearReference(); audio.checked=true; audio.disabled=true; }
+  else { audio.checked=true; audio.disabled=false; }
+  $('#audio-control').hidden=selfHosted;
+  $('#model-hint').hidden=!selfHosted;
+  // LTX 2.3 MVP is benchmarked at 480p/720p; keep Seedance's 1080p option independent.
+  Array.from($('#resolution').options).forEach(option=>{if(option.textContent==='1080p')option.disabled=selfHosted;});
+  if(selfHosted && $('#resolution').value==='1080p') $('#resolution').value='720p';
+}
 
 $('#generate-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form=event.currentTarget; const button=$('#submit-button'); button.disabled=true; button.innerHTML='<i class="mini-loader"></i> 提交中';
   const data=new FormData(form); data.set('generate_audio', data.has('generate_audio') ? 'true' : 'false');
   try {
     const result=await api('./api/tasks', {method:'POST', body:data}); showToast('任务已提交，正在开始创作');
-    form.reset(); clearReference(); $('#char-count').textContent='0 / 3000'; await loadTasks(true); openTask(result.task.id);
+    form.reset(); clearReference(); syncModelCapabilities(); $('#char-count').textContent='0 / 3000'; await loadTasks(true); openTask(result.task.id);
   } catch(err) { showRequestError(err); }
   finally { button.disabled=false; button.innerHTML='<span>✦</span> 开始生成'; }
 });
@@ -117,10 +132,11 @@ $('#reference').addEventListener('change', event => {
 function clearReference(){ $('#reference').value=''; $('#reference-image').removeAttribute('src'); $('#reference-preview').hidden=true; $('#reference-guide').hidden=true; }
 $('#remove-reference').addEventListener('click', clearReference);
 $('#ratio').addEventListener('change', event => { const ratio=event.target.value; $('#ratio-icon').className=`ratio-icon ${['9:16','3:4'].includes(ratio)?'portrait':ratio==='1:1'?'square':'landscape'}`; });
+$('#model').addEventListener('change', syncModelCapabilities);
 document.querySelectorAll('[data-prompt]').forEach(card => card.addEventListener('click', () => { $('#prompt').value=card.dataset.prompt; $('#prompt').dispatchEvent(new Event('input')); $('#prompt').focus(); window.scrollTo({top:0,behavior:'smooth'}); }));
 $('#new-task').addEventListener('click', resetComposer); $('#back-button').addEventListener('click', resetComposer);
 $('#sidebar-open').addEventListener('click', openSidebar); $('#sidebar-close').addEventListener('click', closeSidebar); $('#sidebar-scrim').addEventListener('click', closeSidebar);
 $('#error-close').addEventListener('click', closeError); $('#error-confirm').addEventListener('click', closeError); $('#error-dialog').addEventListener('click', event=>{if(event.target===$('#error-dialog'))closeError();});
 document.addEventListener('keydown', event=>{if(event.key==='Escape')closeError();});
 $('#logout').addEventListener('click', async()=>{ try{await api('./api/logout',{method:'POST'});}finally{location.href='./login';} });
-loadTasks(); state.timer=setInterval(()=>loadTasks(true), 8000);
+syncModelCapabilities(); loadTasks(); state.timer=setInterval(()=>loadTasks(true), 8000);

@@ -13,11 +13,15 @@ class VideoDefaults:
 
 
 SUPPORTED_MODELS = (
+    "pinkcherry-ltx-2.3-v1.8",
     "seedance-2.5",
     "seedance-2-mini",
     "seedance-2-fast",
     "seedance-2.0",
 )
+
+SELF_HOSTED_MODELS = frozenset({"pinkcherry-ltx-2.3-v1.8"})
+SEEDANCE_MODELS = frozenset(SUPPORTED_MODELS) - SELF_HOSTED_MODELS
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "expired"})
 DEFAULTS = VideoDefaults()

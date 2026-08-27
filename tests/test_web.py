@@ -121,3 +121,51 @@ def test_task_creation_rejects_unknown_model_before_calling_provider(
         )
     assert response.status_code == 422
     assert response.json()["detail"] == "生成模型不受支持"
+
+
+def test_self_hosted_task_uses_independent_provider_ids(tmp_path: Path, monkeypatch) -> None:
+    class FakeRunPod:
+        def create_text_video(self, **kwargs):
+            assert kwargs["model"] == "pinkcherry-ltx-2.3-v1.8"
+            return {"id": "runpod-job-123", "status": "queued"}
+
+    def provider_client(provider: str):
+        assert provider == "runpod"
+        yield FakeRunPod()
+
+    monkeypatch.setattr(web, "_provider_client", provider_client)
+    app = create_app(web_settings(tmp_path))
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        response = client.post(
+            "/generate/api/tasks",
+            data={"prompt": "电影感城市夜景", "model": "pinkcherry-ltx-2.3-v1.8"},
+        )
+    assert response.status_code == 201
+    task = response.json()["task"]
+    assert task["id"] != "runpod-job-123"
+    assert task["provider"] == "runpod"
+    assert task["provider_task_id"] == "runpod-job-123"
+
+
+def test_self_hosted_task_rejects_reference_before_provider(tmp_path: Path, monkeypatch) -> None:
+    def provider_must_not_be_called(provider: str):
+        raise AssertionError(f"provider {provider} should not be called")
+
+    monkeypatch.setattr(web, "_provider_client", provider_must_not_be_called)
+    app = create_app(web_settings(tmp_path))
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        response = client.post(
+            "/generate/api/tasks",
+            data={"prompt": "测试", "model": "pinkcherry-ltx-2.3-v1.8"},
+            files={"reference": ("test.png", b"png", "image/png")},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "自建模型首版暂不支持参考图"

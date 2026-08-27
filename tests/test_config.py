@@ -1,10 +1,10 @@
-from ai_vedio.capabilities import SUPPORTED_MODELS, VERIFIED_CAPABILITIES
+from ai_vedio.capabilities import SEEDANCE_MODELS, VERIFIED_CAPABILITIES
 from ai_vedio.config import load_settings
 
 
 def test_local_configuration_has_all_verified_models() -> None:
     settings = load_settings()
-    assert set(settings.endpoints) == set(SUPPORTED_MODELS)
+    assert set(settings.endpoints) == set(SEEDANCE_MODELS)
     assert settings.modelark_base_url == "https://ark.ap-southeast.bytepluses.com/api/v3"
     assert settings.asset_library_region == VERIFIED_CAPABILITIES["region"]
 

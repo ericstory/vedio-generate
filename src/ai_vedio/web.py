@@ -12,13 +12,15 @@ from pathlib import Path
 import secrets
 import sqlite3
 from typing import Any, Iterator
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .capabilities import SUPPORTED_MODELS
-from .config import PROJECT_ROOT, load_settings
+from .capabilities import SELF_HOSTED_MODELS, SUPPORTED_MODELS
+from .config import PROJECT_ROOT, load_runpod_settings, load_settings
+from .runpod import RunPodClient
 from .seedance import SeedanceClient, SeedanceError
 
 
@@ -74,6 +76,8 @@ class TaskStore:
                 """
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL DEFAULT 'seedance',
+                    provider_task_id TEXT,
                     prompt TEXT NOT NULL,
                     model TEXT NOT NULL,
                     ratio TEXT NOT NULL,
@@ -88,6 +92,14 @@ class TaskStore:
                 )
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "provider" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN provider TEXT NOT NULL DEFAULT 'seedance'")
+            if "provider_task_id" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN provider_task_id TEXT")
+            db.execute(
+                "UPDATE tasks SET provider_task_id=id WHERE provider_task_id IS NULL OR provider_task_id=''"
+            )
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=10)
@@ -95,12 +107,17 @@ class TaskStore:
         return db
 
     def create(self, task: dict[str, Any]) -> None:
+        task = {
+            "provider": "seedance",
+            "provider_task_id": task["id"],
+            **task,
+        }
         with self.connect() as db:
             db.execute(
                 """INSERT INTO tasks
-                (id, prompt, model, ratio, resolution, duration, has_reference,
+                (id, provider, provider_task_id, prompt, model, ratio, resolution, duration, has_reference,
                  status, video_url, error, created_at, updated_at)
-                VALUES (:id, :prompt, :model, :ratio, :resolution, :duration,
+                VALUES (:id, :provider, :provider_task_id, :prompt, :model, :ratio, :resolution, :duration,
                         :has_reference, :status, NULL, NULL, :created_at, :created_at)""",
                 task,
             )
@@ -235,6 +252,20 @@ def _client() -> Iterator[SeedanceClient]:
         client.close()
 
 
+def _runpod_client() -> Iterator[RunPodClient]:
+    client = RunPodClient(load_runpod_settings())
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+def _provider_client(provider: str) -> Iterator[SeedanceClient | RunPodClient]:
+    if provider == "runpod":
+        return _runpod_client()
+    return _client()
+
+
 def create_app(web_settings: WebSettings | None = None) -> FastAPI:
     settings = web_settings or load_web_settings()
 
@@ -330,12 +361,14 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         tasks = store.list()
         active = [task for task in tasks if task["status"] not in {"succeeded", "failed", "cancelled", "expired"}]
         if active:
-            try:
-                for client in _client():
-                    for task in active[:10]:
-                        store.update_remote(task["id"], client.get_task(task["id"]))
-            except (SeedanceError, ValueError):
-                pass
+            for task in active[:10]:
+                try:
+                    for client in _provider_client(task.get("provider") or "seedance"):
+                        remote_id = task.get("provider_task_id") or task["id"]
+                        store.update_remote(task["id"], client.get_task(remote_id))
+                except (SeedanceError, ValueError):
+                    # A temporary provider outage must not make the whole task list unavailable.
+                    continue
             tasks = store.list()
         return {"tasks": tasks}
 
@@ -358,6 +391,11 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="生成模型不受支持")
         if ratio not in ALLOWED_RATIOS or resolution not in ALLOWED_RESOLUTIONS or duration not in ALLOWED_DURATIONS:
             raise HTTPException(status_code=422, detail="视频参数不受支持")
+        is_self_hosted = model in SELF_HOSTED_MODELS
+        if is_self_hosted and resolution == "1080p":
+            raise HTTPException(status_code=422, detail="自建模型首版仅支持 480p 或 720p")
+        if is_self_hosted and reference and reference.filename:
+            raise HTTPException(status_code=422, detail="自建模型首版暂不支持参考图")
         image_data_url = None
         if reference and reference.filename:
             if reference.content_type not in ALLOWED_IMAGE_TYPES:
@@ -367,7 +405,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 raise HTTPException(status_code=413, detail="参考图不能超过 30MB")
             image_data_url = f"data:{reference.content_type};base64,{base64.b64encode(raw).decode()}"
         try:
-            for client in _client():
+            provider = "runpod" if is_self_hosted else "seedance"
+            for client in _provider_client(provider):
                 options = dict(
                     ratio=ratio,
                     resolution=resolution,
@@ -375,7 +414,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                     generate_audio=generate_audio,
                     watermark=True,
                 )
-                if image_data_url:
+                if image_data_url and not is_self_hosted:
                     remote = client.create_reference_video(
                         prompt=prompt, image_url=image_data_url, model=model, **options
                     )
@@ -385,12 +424,15 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             return _generation_error(exc)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        task_id = str(remote.get("id") or "")
-        if not task_id:
+        provider_task_id = str(remote.get("id") or "")
+        if not provider_task_id:
             raise HTTPException(status_code=502, detail="生成服务未返回任务编号")
+        task_id = str(uuid4())
         created_at = _now()
         task = {
             "id": task_id,
+            "provider": provider,
+            "provider_task_id": provider_task_id,
             "prompt": prompt,
             "model": model,
             "ratio": ratio,
