@@ -99,3 +99,10 @@ def test_pipeline_runs_under_torch_inference_mode() -> None:
         )
     ]
     assert inference_contexts, "LTX pipeline must match the official inference-mode entrypoint"
+    context = inference_contexts[0]
+    calls = {
+        node.func.id
+        for node in ast.walk(context)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "encode_video" in calls, "lazy VAE decode must remain inside inference mode"

@@ -146,8 +146,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="ltx-job-") as directory:
         output = Path(directory) / "output.mp4"
         # LTX's official CLI runs the complete pipeline under inference mode.
-        # Some offloaded modules are materialized as inference tensors while loading,
-        # so invoking them with autograd enabled later raises a runtime error.
+        # The returned video is a lazy iterator, so encode_video must stay inside
+        # the same context: consuming it performs the actual VAE decode.
         with torch.inference_mode():
             result = _pipeline()(
                 prompt=prompt,
@@ -162,14 +162,14 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
                 video_guider_params=LTX_2_3_PARAMS.video_guider_params,
                 audio_guider_params=LTX_2_3_PARAMS.audio_guider_params,
             )
-        encode_video(
-            video=result.video,
-            fps=FPS,
-            audio=result.audio,
-            output_path=str(output),
-            video_chunks_number=get_video_chunks_number(result.num_frames, result.tiling_config),
-            color_space=None,
-        )
+            encode_video(
+                video=result.video,
+                fps=FPS,
+                audio=result.audio,
+                output_path=str(output),
+                video_chunks_number=get_video_chunks_number(result.num_frames, result.tiling_config),
+                color_space=None,
+            )
         key = f"videos/{job.get('id') or uuid4()}.mp4"
         return {
             "video_url": _upload(output, key),
