@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import sleep
 from typing import Any
 
 import httpx
@@ -27,6 +28,7 @@ class RunPodClient:
 
     def __init__(self, settings: RunPodSettings, *, timeout: float = 60.0) -> None:
         self.settings = settings
+        self._activation_retry_delays = (0.5, 1.0, 2.0, 3.0, 4.0)
         self._client = httpx.Client(
             base_url=f"{settings.api_base_url}/{settings.endpoint_id}",
             headers={
@@ -125,7 +127,18 @@ class RunPodClient:
         try:
             # RunPod's per-job TTL query value is milliseconds. Execution timeout is
             # configured on the endpoint so queue policy remains an infrastructure concern.
-            return self._normalize(self._request("POST", "/run?ttl=7200000", json=payload))
+            for attempt, delay in enumerate((0.0, *self._activation_retry_delays)):
+                if delay:
+                    sleep(delay)
+                try:
+                    return self._normalize(
+                        self._request("POST", "/run?ttl=7200000", json=payload)
+                    )
+                except RunPodError as exc:
+                    final_attempt = attempt == len(self._activation_retry_delays)
+                    if exc.code != "ENDPOINT_PAUSED" or final_attempt:
+                        raise
+            raise RuntimeError("unreachable RunPod activation retry state")
         except Exception:
             self.set_workers_max(0)
             raise

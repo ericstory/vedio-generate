@@ -104,3 +104,47 @@ def test_failed_submission_immediately_closes_gpu_gate() -> None:
         {"workersMax": 0, "workersMin": 0},
     ]
     client.close()
+
+
+def test_submission_retries_endpoint_activation_propagation() -> None:
+    job_attempts = 0
+    management_payloads = []
+
+    def job_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal job_attempts
+        job_attempts += 1
+        if job_attempts < 3:
+            return httpx.Response(
+                409,
+                json={
+                    "status": 409,
+                    "detail": "Endpoint is paused",
+                    "code": "ENDPOINT_PAUSED",
+                },
+            )
+        return httpx.Response(200, json={"id": "rp-retried", "status": "IN_QUEUE"})
+
+    def management_handler(request: httpx.Request) -> httpx.Response:
+        management_payloads.append(__import__("json").loads(request.content))
+        return httpx.Response(200, json={"id": "endpoint"})
+
+    client = RunPodClient(settings())
+    client._activation_retry_delays = (0.0, 0.0)
+    client._client.close()
+    client._management_client.close()
+    client._client = httpx.Client(
+        base_url="https://api.runpod.ai/v2/endpoint",
+        transport=httpx.MockTransport(job_handler),
+    )
+    client._management_client = httpx.Client(
+        base_url="https://rest.runpod.io/v1",
+        transport=httpx.MockTransport(management_handler),
+    )
+    result = client.create_text_video(
+        prompt="测试",
+        model="pinkcherry-ltx-2.3-v1.8",
+    )
+    assert result["id"] == "rp-retried"
+    assert job_attempts == 3
+    assert management_payloads == [{"workersMax": 1, "workersMin": 0}]
+    client.close()
