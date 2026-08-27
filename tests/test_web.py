@@ -14,6 +14,7 @@ from ai_vedio.web import (
 )
 from ai_vedio.web import _generation_error
 from ai_vedio.seedance import SeedanceError
+from ai_vedio.runpod import RunPodError
 
 
 def web_settings(tmp_path: Path) -> WebSettings:
@@ -171,6 +172,48 @@ def test_cost_guard_persists_terminal_task_and_closes_gpu_gate(
     task = store.get("local-one")
     assert task and task["status"] == "succeeded"
     assert task["video_url"] == "/generate/media/result.mp4"
+    assert fake.workers_max == [0]
+
+
+def test_cost_guard_expires_job_from_retired_endpoint(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    store.create(
+        {
+            "id": "stale-local",
+            "provider": "runpod",
+            "provider_task_id": "stale-remote",
+            "prompt": "旧任务",
+            "model": "pinkcherry-ltx-2.3-v1.8",
+            "ratio": "16:9",
+            "resolution": "480p",
+            "duration": 4,
+            "has_reference": 0,
+            "status": "queued",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+
+    class MissingJobRunPod:
+        workers_max = []
+
+        def get_task(self, task_id: str):
+            raise RunPodError("job not found", status_code=404)
+
+        def set_workers_max(self, value: int):
+            self.workers_max.append(value)
+
+        def close(self):
+            pass
+
+    fake = MissingJobRunPod()
+
+    def fake_client():
+        yield fake
+
+    monkeypatch.setattr(web, "_runpod_client", fake_client)
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is False
+    task = store.get("stale-local")
+    assert task and task["status"] == "expired"
     assert fake.workers_max == [0]
 
 

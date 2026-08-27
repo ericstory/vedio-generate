@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .capabilities import SELF_HOSTED_MODELS, SUPPORTED_MODELS
 from .config import PROJECT_ROOT, load_runpod_settings, load_settings
-from .runpod import RunPodClient
+from .runpod import RunPodClient, RunPodError
 from .seedance import SeedanceClient, SeedanceError
 
 
@@ -306,7 +306,22 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
         for client in _runpod_client():
             for task in active_before:
                 remote_id = task.get("provider_task_id") or task["id"]
-                store.update_remote(task["id"], client.get_task(remote_id))
+                try:
+                    remote = client.get_task(remote_id)
+                except RunPodError as exc:
+                    if exc.status_code == 404:
+                        # Jobs created against a retired endpoint cannot be queried
+                        # through the current endpoint and must not block new work.
+                        store.update_remote(
+                            task["id"],
+                            {
+                                "status": "expired",
+                                "content": {},
+                                "error": "历史 RunPod Endpoint 任务已不可用",
+                            },
+                        )
+                    continue
+                store.update_remote(task["id"], remote)
             active_after = bool(store.active_runpod())
             if not active_after and (shutdown_if_idle or bool(active_before)):
                 client.set_workers_max(0)
