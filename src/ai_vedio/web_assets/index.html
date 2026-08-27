@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="__BASE_PATH__/">
+  <title>AI 视频生成 · WhichDrama Studio</title>
+  <link rel="stylesheet" href="./static/app.css">
+</head>
+<body class="app-page">
+  <aside class="sidebar" id="sidebar">
+    <header class="sidebar-header">
+      <a class="brand" href="./"><span class="brand-mark"><i></i><i></i><i></i></span><span>WhichDrama <b>Studio</b></span></a>
+      <button id="sidebar-close" class="icon-button mobile-only" aria-label="关闭任务栏">×</button>
+    </header>
+    <button class="new-task active" id="new-task"><span>＋</span> 新建生成</button>
+    <div class="task-heading"><span>任务清单</span><span id="task-count">0</span></div>
+    <div class="task-list" id="task-list">
+      <div class="task-empty"><div class="empty-icon">✦</div><p>还没有生成任务</p><small>你的创作记录会出现在这里</small></div>
+    </div>
+    <footer class="sidebar-footer">
+      <div class="account"><span class="avatar">A</span><span><b>管理员</b><small>Admin workspace</small></span></div>
+      <button class="icon-button" id="logout" title="退出登录" aria-label="退出登录">↗</button>
+    </footer>
+  </aside>
+
+  <main class="workspace">
+    <header class="topbar">
+      <button id="sidebar-open" class="icon-button mobile-only" aria-label="打开任务栏">☰</button>
+      <span class="crumb"><i></i> AI 视频生成</span>
+      <span class="online"><i></i> 服务在线</span>
+    </header>
+
+    <section class="hero" id="composer-view">
+      <div class="hero-copy">
+        <span class="spark">✦</span>
+        <h1>把想象，变成画面</h1>
+        <p>描述你的灵感，AI 将为你生成一段独一无二的视频</p>
+      </div>
+      <form id="generate-form" class="composer">
+        <textarea id="prompt" name="prompt" maxlength="3000" placeholder="描述你想生成的画面，例如：雨后的东京街头，霓虹灯倒映在水面上，镜头缓慢向前推进……" required></textarea>
+        <div id="reference-preview" class="reference-preview" hidden>
+          <img id="reference-image" alt="参考图预览"><span><b id="reference-name"></b><small>参考图片</small></span>
+          <button id="remove-reference" type="button" aria-label="移除参考图">×</button>
+        </div>
+        <div id="reference-guide" class="reference-guide" hidden>
+          <span>i</span>
+          <p><b>真人参考图需要预先验证</b><small>包含可识别人脸的图片不能直接上传，请先加入 BytePlus 受信任素材库；普通物品、场景或插画可直接使用。</small></p>
+        </div>
+        <div class="composer-bar">
+          <label class="upload-button" title="添加参考图片">
+            <input id="reference" name="reference" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic">
+            <span>⊕</span> 参考图
+          </label>
+          <div class="divider"></div>
+          <div class="control-group">
+            <span class="control-label">画幅</span>
+            <div class="select-wrap"><span id="ratio-icon" class="ratio-icon landscape"></span><select name="ratio" id="ratio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></div>
+          </div>
+          <div class="control-group"><span class="control-label">清晰度</span><select name="resolution"><option>480p</option><option selected>720p</option><option>1080p</option></select></div>
+          <div class="control-group"><span class="control-label">时长</span><select name="duration"><option value="4">4 秒</option><option value="6" selected>6 秒</option><option value="8">8 秒</option><option value="10">10 秒</option><option value="12">12 秒</option><option value="15">15 秒</option></select></div>
+          <label class="audio-toggle"><input type="checkbox" name="generate_audio" checked><span></span> 音效</label>
+          <input type="hidden" name="model" value="seedance-2.0">
+          <button id="submit-button" class="generate-button" type="submit"><span>✦</span> 开始生成</button>
+        </div>
+        <div class="composer-meta"><span id="char-count">0 / 3000</span><span>支持中文与英文描述</span></div>
+      </form>
+
+      <div class="inspiration">
+        <div class="section-title"><span>灵感起点</span><small>点击快速使用</small></div>
+        <div class="prompt-cards">
+          <button type="button" data-prompt="雨后的东京街头，霓虹灯倒映在湿润的路面上，一位撑着透明雨伞的女孩从镜头前走过，电影感，镜头缓慢向前推进">
+            <span class="card-art night"><i>城市</i></span><b>雨夜漫步</b><small>电影感 · 推镜</small>
+          </button>
+          <button type="button" data-prompt="清晨的云海之上，金色阳光从群山间升起，薄雾流动，航拍镜头缓慢横移，宁静而壮阔">
+            <span class="card-art sunrise"><i>自然</i></span><b>云海日出</b><small>航拍 · 横移</small>
+          </button>
+          <button type="button" data-prompt="未来感银色跑车穿过赛博朋克城市，蓝紫色光线在车身流动，低机位追踪镜头，速度感强烈">
+            <span class="card-art future"><i>科幻</i></span><b>未来疾驰</b><small>追踪 · 动态</small>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section class="detail-view" id="detail-view" hidden>
+      <button class="back-button" id="back-button">← 返回创作</button>
+      <div class="result-card">
+        <div class="result-video" id="result-video"><div class="result-placeholder"><span class="loader"></span><b>正在创作中</b><small>通常需要几分钟，请稍候</small></div></div>
+        <div class="result-info"><span id="detail-status" class="status-pill">生成中</span><h2 id="detail-title"></h2><div id="detail-meta" class="detail-meta"></div><p id="detail-error" class="form-error"></p></div>
+      </div>
+    </section>
+    <div id="toast" class="toast" role="status"></div>
+  </main>
+  <div id="sidebar-scrim" class="sidebar-scrim"></div>
+  <div id="error-dialog" class="dialog-backdrop" hidden>
+    <section class="error-dialog" role="alertdialog" aria-labelledby="error-title" aria-describedby="error-message">
+      <button id="error-close" class="dialog-close" type="button" aria-label="关闭">×</button>
+      <span class="dialog-icon">!</span>
+      <p class="eyebrow dark">生成未开始</p>
+      <h2 id="error-title">请求未通过</h2>
+      <p id="error-message" class="dialog-message"></p>
+      <div class="error-code"><span>错误代码</span><code id="error-code"></code></div>
+      <div class="guidance-box"><b>建议这样处理</b><ol id="error-guidance"></ol></div>
+      <details id="error-technical"><summary>查看技术详情</summary><p id="error-upstream"></p></details>
+      <button id="error-confirm" class="primary-button" type="button">我知道了</button>
+    </section>
+  </div>
+  <script src="./static/app.js" defer></script>
+</body>
+</html>

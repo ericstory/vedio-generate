@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-vedio"
+version = "0.1.0"
+description = "Global BytePlus Seedance video generation platform foundation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "byteplus-sdk==1.0.53",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "python-multipart>=0.0.20,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_vedio"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

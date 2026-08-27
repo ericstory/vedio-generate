@@ -1,0 +1,25 @@
+from pathlib import Path
+
+
+def test_async_submit_keeps_a_stable_form_reference() -> None:
+    script = (
+        Path(__file__).parents[1]
+        / "src"
+        / "ai_vedio"
+        / "web_assets"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+    assert "const form=event.currentTarget" in script
+    assert "form.reset()" in script
+    assert "event.currentTarget.reset()" not in script
+
+
+def test_frontend_displays_structured_generation_errors() -> None:
+    root = Path(__file__).parents[1] / "src" / "ai_vedio" / "web_assets"
+    script = (root / "static" / "app.js").read_text(encoding="utf-8")
+    markup = (root / "index.html").read_text(encoding="utf-8")
+    assert "showRequestError(err)" in script
+    assert "upstream_message" in script
+    assert 'id="error-guidance"' in markup
+    assert 'id="reference-guide"' in markup
