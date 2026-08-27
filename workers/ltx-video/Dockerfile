@@ -32,6 +32,13 @@ RUN git clone https://github.com/Lightricks/LTX-2.git /opt/LTX-2 && \
 
 RUN uv pip install "httpx>=0.28,<1"
 
+# PyTorch/Triton compiles a small CUDA driver shim on the first real inference.
+# Keep this after the expensive Python dependency layer so CI can reuse its cache.
+ENV CC=/usr/bin/gcc \
+    CXX=/usr/bin/g++
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY handler.py /app/handler.py
 COPY worker_config.py /app/worker_config.py

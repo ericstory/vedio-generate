@@ -82,8 +82,11 @@ up to 250MB, so RunPod credentials never need to be exposed to the browser.
 仓库的 `.github/workflows/ltx-worker.yml` 会把镜像发布到 `ghcr.io/<owner>/papa-ltx-video`。RunPod 使用精确 SHA tag，不建议生产 Endpoint 跟随 `latest`。
 
 镜像默认使用 CUDA 13.2，因为锁定的 LTX commit 的 `natten` extra 固定为
-`torch 2.13.0 + cu132`。创建 Pod/Endpoint 时应要求 `min CUDA version=13.2`；如果候选
-GPU 池不满足该版本，需要先换用经 GPU 验证的早期 LTX commit，而不是静默降低驱动要求。
+`torch 2.13.0 + cu132`。RunPod 当前 Endpoint API 的 CUDA 筛选枚举最高为 13.0，因此基础设施
+使用 `min CUDA version=13.0`，并通过真实 GPU 推理验证主机驱动可以运行 cu132 镜像；不能仅凭
+容器健康检查假定 CUDA 兼容。
+镜像同时保留 `build-essential`，因为 PyTorch/Triton 会在第一次真实推理时编译一个小型
+CUDA driver shim；仅完成模型加载的健康检查不会触发这个编译步骤。
 
 ## 付费边界
 
