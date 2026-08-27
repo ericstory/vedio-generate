@@ -145,19 +145,23 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory(prefix="ltx-job-") as directory:
         output = Path(directory) / "output.mp4"
-        result = _pipeline()(
-            prompt=prompt,
-            negative_prompt=os.getenv("LTX_NEGATIVE_PROMPT", DEFAULT_NEGATIVE_PROMPT),
-            seed=seed,
-            height=height,
-            width=width,
-            frame_rate=FPS,
-            images=[],
-            num_frames=frame_count(duration),
-            num_inference_steps=int(os.getenv("LTX_INFERENCE_STEPS", "20")),
-            video_guider_params=LTX_2_3_PARAMS.video_guider_params,
-            audio_guider_params=LTX_2_3_PARAMS.audio_guider_params,
-        )
+        # LTX's official CLI runs the complete pipeline under inference mode.
+        # Some offloaded modules are materialized as inference tensors while loading,
+        # so invoking them with autograd enabled later raises a runtime error.
+        with torch.inference_mode():
+            result = _pipeline()(
+                prompt=prompt,
+                negative_prompt=os.getenv("LTX_NEGATIVE_PROMPT", DEFAULT_NEGATIVE_PROMPT),
+                seed=seed,
+                height=height,
+                width=width,
+                frame_rate=FPS,
+                images=[],
+                num_frames=frame_count(duration),
+                num_inference_steps=int(os.getenv("LTX_INFERENCE_STEPS", "20")),
+                video_guider_params=LTX_2_3_PARAMS.video_guider_params,
+                audio_guider_params=LTX_2_3_PARAMS.audio_guider_params,
+            )
         encode_video(
             video=result.video,
             fps=FPS,

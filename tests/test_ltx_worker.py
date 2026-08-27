@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ast
 import json
 from pathlib import Path
 
@@ -80,3 +81,21 @@ def test_model_lock_matches_expected_storage_budget() -> None:
     assert sum(item["size"] for item in lock["artifacts"]) == lock["expected_download_bytes"]
     assert lock["expected_download_bytes"] == 79_155_298_327
     assert all(len(item["revision"]) == 40 for item in lock["artifacts"])
+
+
+def test_pipeline_runs_under_torch_inference_mode() -> None:
+    tree = ast.parse((WORKER_ROOT / "handler.py").read_text(encoding="utf-8"))
+    inference_contexts = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and isinstance(item.context_expr.func.value, ast.Name)
+            and item.context_expr.func.value.id == "torch"
+            and item.context_expr.func.attr == "inference_mode"
+            for item in node.items
+        )
+    ]
+    assert inference_contexts, "LTX pipeline must match the official inference-mode entrypoint"
