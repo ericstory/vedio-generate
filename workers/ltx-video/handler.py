@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 import boto3
+import httpx
 import runpod
 import torch
 from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
@@ -93,6 +94,23 @@ def _pipeline() -> TI2VidTwoStagesPipeline:
 
 
 def _upload(path: Path, key: str) -> str:
+    upload_url = os.getenv("VIDEO_UPLOAD_URL", "").strip()
+    if upload_url:
+        token = os.environ["VIDEO_UPLOAD_TOKEN"]
+        with path.open("rb") as stream:
+            response = httpx.post(
+                upload_url,
+                headers={"Authorization": f"Bearer {token}"},
+                files={"video": (path.name, stream, "video/mp4")},
+                timeout=float(os.getenv("VIDEO_UPLOAD_TIMEOUT_SECONDS", "300")),
+            )
+        response.raise_for_status()
+        body = response.json()
+        video_url = str(body.get("video_url") or "")
+        if not video_url:
+            raise RuntimeError("video upload response did not contain video_url")
+        return video_url
+
     bucket = os.environ["S3_BUCKET"]
     client = boto3.client(
         "s3",

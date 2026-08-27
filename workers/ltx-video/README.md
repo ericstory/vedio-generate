@@ -50,6 +50,13 @@ Community License 约束。当前服务仅用于密码保护的私人研究。Wo
 ## Worker Variables
 
 ```dotenv
+# Preferred for the private Railway deployment: authenticated upload into its
+# existing persistent volume. Use the same long random token on both services.
+VIDEO_UPLOAD_URL=https://video-generator-production-8c1e.up.railway.app/generate/api/internal/video-upload
+VIDEO_UPLOAD_TOKEN=
+VIDEO_UPLOAD_TIMEOUT_SECONDS=300
+
+# Optional generic R2/S3 fallback when VIDEO_UPLOAD_URL is not set.
 S3_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com
 S3_REGION=auto
 S3_BUCKET=papa-video
@@ -65,6 +72,10 @@ SELF_HOSTED_MODEL_ID=SexGod1979/PinkCherry_NSFW_LTX23
 SELF_HOSTED_MODEL_VERSION=PinkCherry_FineTune_bf16_v1_8_LTX23
 SELF_HOSTED_WORKFLOW_VERSION=pinkcherry-native-two-stage-v1
 ```
+
+The Railway upload endpoint stores MP4 files in `VIDEO_OUTPUT_DIR` and serves them only to an
+authenticated admin session. The upload itself uses a separate bearer token and accepts MP4 files
+up to 250MB, so RunPod credentials never need to be exposed to the browser.
 
 构建并推送 `linux/amd64` 镜像后，在 RunPod 创建 Queue-based Serverless Endpoint，挂载上述 Network Volume。建议 execution timeout 30 分钟、job TTL 2 小时、min workers 为 0、max workers 先设为 1、idle timeout 为 5 秒。
 

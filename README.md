@@ -69,7 +69,14 @@ ADMIN_PASSWORD=请设置高强度密码
 SESSION_SECRET=请设置至少32位的随机字符串
 APP_BASE_PATH=/generate
 TASK_DATABASE_PATH=data/tasks.db
+VIDEO_OUTPUT_DIR=data/generated-videos
+VIDEO_UPLOAD_TOKEN=<long-random-shared-worker-token>
 ```
+
+For the private self-hosted chain, the GPU worker uploads the finished MP4 to the authenticated
+internal endpoint under `APP_BASE_PATH`. Railway writes it to the existing persistent volume and
+only serves it to a valid admin session. Configure the same `VIDEO_UPLOAD_TOKEN` on Railway and in
+the RunPod worker template; do not expose this token to frontend code.
 
 本地启动：
 

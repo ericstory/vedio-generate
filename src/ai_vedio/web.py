@@ -15,7 +15,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .capabilities import SELF_HOSTED_MODELS, SUPPORTED_MODELS
@@ -29,6 +29,7 @@ WEB_DIR = PACKAGE_DIR / "web_assets"
 SESSION_COOKIE = "ai_video_session"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/heic"}
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
+MAX_VIDEO_BYTES = 250 * 1024 * 1024
 ALLOWED_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
 ALLOWED_RESOLUTIONS = {"480p", "720p", "1080p"}
 ALLOWED_DURATIONS = set(range(4, 16))
@@ -43,6 +44,8 @@ class WebSettings:
     database_path: Path
     secure_cookie: bool
     cookie_domain: str | None = None
+    video_upload_token: str = ""
+    video_output_dir: Path | None = None
 
 
 def load_web_settings() -> WebSettings:
@@ -56,6 +59,15 @@ def load_web_settings() -> WebSettings:
     database = Path(os.getenv("TASK_DATABASE_PATH", "data/tasks.db"))
     if not database.is_absolute():
         database = PROJECT_ROOT / database
+    output_dir = Path(
+        os.getenv("VIDEO_OUTPUT_DIR")
+        or str(
+            Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", database.parent))
+            / "generated-videos"
+        )
+    )
+    if not output_dir.is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
     return WebSettings(
         username=os.getenv("ADMIN_USERNAME", "admin"),
         password=os.getenv("ADMIN_PASSWORD", ""),
@@ -64,6 +76,8 @@ def load_web_settings() -> WebSettings:
         database_path=database,
         secure_cookie=os.getenv("COOKIE_SECURE", "1") != "0",
         cookie_domain=os.getenv("COOKIE_DOMAIN") or None,
+        video_upload_token=os.getenv("VIDEO_UPLOAD_TOKEN", ""),
+        video_output_dir=output_dir,
     )
 
 
@@ -273,6 +287,11 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.web_settings = settings
         app.state.store = TaskStore(settings.database_path)
+        app.state.video_output_dir = (
+            settings.video_output_dir
+            or settings.database_path.parent / "generated-videos"
+        )
+        app.state.video_output_dir.mkdir(parents=True, exist_ok=True)
         yield
 
     app = FastAPI(title="AI 视频生成", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -353,6 +372,47 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             SESSION_COOKIE, path=settings.base_path, domain=settings.cookie_domain
         )
         return response
+
+    @app.post(f"{settings.base_path}/api/internal/video-upload")
+    async def upload_generated_video(request: Request, video: UploadFile = File(...)):
+        configured_token = settings.video_upload_token
+        supplied = request.headers.get("authorization", "")
+        expected = f"Bearer {configured_token}"
+        if not configured_token:
+            raise HTTPException(status_code=503, detail="视频上传通道尚未配置")
+        if not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=401, detail="视频上传凭据无效")
+        if video.content_type != "video/mp4":
+            raise HTTPException(status_code=415, detail="仅接受 MP4 视频")
+
+        output_dir: Path = request.app.state.video_output_dir
+        filename = f"{uuid4()}.mp4"
+        destination = output_dir / filename
+        partial = output_dir / f".{filename}.part"
+        written = 0
+        try:
+            with partial.open("wb") as target:
+                while chunk := await video.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > MAX_VIDEO_BYTES:
+                        raise HTTPException(status_code=413, detail="生成视频不能超过 250MB")
+                    target.write(chunk)
+            partial.replace(destination)
+        finally:
+            if partial.exists():
+                partial.unlink()
+            await video.close()
+        return {"video_url": f"{settings.base_path}/media/{filename}"}
+
+    @app.get(f"{settings.base_path}/media/{{filename}}")
+    async def generated_video(request: Request, filename: str):
+        _require_auth(request)
+        if not filename.endswith(".mp4") or Path(filename).name != filename:
+            raise HTTPException(status_code=404, detail="视频不存在")
+        path: Path = request.app.state.video_output_dir / filename
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="视频不存在")
+        return FileResponse(path, media_type="video/mp4")
 
     @app.get(f"{settings.base_path}/api/tasks")
     async def list_tasks(request: Request):

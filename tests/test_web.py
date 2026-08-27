@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -60,6 +61,41 @@ def test_login_guards_generate_page(tmp_path: Path) -> None:
         assert response.status_code == 303
         assert response.headers["location"] == "/generate"
         assert response.cookies.get("ai_video_session")
+
+
+def test_worker_upload_is_private_and_saved_to_volume(tmp_path: Path) -> None:
+    settings = replace(
+        web_settings(tmp_path),
+        video_upload_token="test-worker-token",
+        video_output_dir=tmp_path / "generated-videos",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        unauthorized = client.post(
+            "/generate/api/internal/video-upload",
+            files={"video": ("output.mp4", b"video-bytes", "video/mp4")},
+        )
+        assert unauthorized.status_code == 401
+
+        uploaded = client.post(
+            "/generate/api/internal/video-upload",
+            headers={"Authorization": "Bearer test-worker-token"},
+            files={"video": ("output.mp4", b"video-bytes", "video/mp4")},
+        )
+        assert uploaded.status_code == 200
+        video_url = uploaded.json()["video_url"]
+        assert video_url.startswith("/generate/media/")
+        assert list((tmp_path / "generated-videos").glob("*.mp4"))[0].read_bytes() == b"video-bytes"
+
+        assert client.get(video_url).status_code == 401
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        response = client.get(video_url)
+        assert response.status_code == 200
+        assert response.content == b"video-bytes"
+        assert response.headers["content-type"] == "video/mp4"
 
 
 def test_task_store_orders_newest_first(tmp_path: Path) -> None:

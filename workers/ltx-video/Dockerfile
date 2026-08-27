@@ -30,6 +30,8 @@ RUN git clone https://github.com/Lightricks/LTX-2.git /opt/LTX-2 && \
     uv pip install -e ./packages/ltx-core -e ./packages/ltx-pipelines && \
     uv pip install "runpod>=1.8,<2" "boto3>=1.40,<2"
 
+RUN uv pip install "httpx>=0.28,<1"
+
 WORKDIR /app
 COPY handler.py /app/handler.py
 COPY worker_config.py /app/worker_config.py
