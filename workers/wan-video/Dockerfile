@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
 
 RUN pip install --break-system-packages --no-cache-dir \
       "diffusers==0.40.0" \
-      "transformers==5.16.1" \
+      "transformers==4.57.6" \
       "accelerate==1.14.0" \
       "peft==0.20.0" \
       "safetensors==0.8.0" \

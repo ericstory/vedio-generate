@@ -10,7 +10,8 @@
 - 输出：4/5/6/8/10/12/15 秒、16fps、按时长生成 `4N+1` 帧；480p 或 720p；
   16:9、9:16、1:1、4:3、3:4 或 21:9。
 - 音频：`cvssp/audioldm2` 根据同一提示词生成同长度环境声/音效，最终 MP4 使用 AAC 音轨；
-  它不是口型同步对白模型。
+  它不是口型同步对白模型。Worker 固定 `transformers==4.57.6`，因为 Diffusers 0.40 的
+  AudioLDM2 仍依赖 5.x 已移除的 GenerationMixin 接口。
 - 推理：BF16 完整双专家、40 steps、CFG 5.0、组件级 CPU offload。
 - Serverless：空闲 `workersMin=0`、`workersMax=0`；提交期间最多 1 个 worker；
   execution timeout 120 分钟。
