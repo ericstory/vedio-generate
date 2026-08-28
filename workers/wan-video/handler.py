@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+from types import MethodType
 from typing import Any
 from uuid import uuid4
 
@@ -37,6 +38,44 @@ AUDIO_MODEL_ROOT = Path(
 )
 _PIPELINE: WanPipeline | None = None
 _AUDIO_PIPELINE: AudioLDM2Pipeline | None = None
+
+
+def _update_audio_model_kwargs(
+    model: Any,
+    outputs: Any,
+    model_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Compatibility bridge for AudioLDM2 on transformers 5.x.
+
+    Diffusers 0.40 still calls this former GenerationMixin helper directly on
+    GPT2Model. Transformers 5 keeps the cache inputs but no longer exposes the
+    helper on that model class.
+    """
+    for cache_name in ("past_key_values", "mems", "past_buckets_states"):
+        cache = getattr(outputs, cache_name, None)
+        if cache is not None:
+            model_kwargs["past_key_values" if cache_name != "past_key_values" else cache_name] = cache
+            break
+    if "token_type_ids" in model_kwargs:
+        token_type_ids = model_kwargs["token_type_ids"]
+        model_kwargs["token_type_ids"] = torch.cat(
+            [token_type_ids, token_type_ids[:, -1:].clone()], dim=-1
+        )
+    if "attention_mask" in model_kwargs:
+        attention_mask = model_kwargs["attention_mask"]
+        model_kwargs["attention_mask"] = torch.cat(
+            [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
+            dim=-1,
+        )
+    cache_position = model_kwargs.get("cache_position")
+    if cache_position is not None:
+        if model_kwargs.get("use_cache", True):
+            model_kwargs["cache_position"] = cache_position[-1:] + 1
+        else:
+            model_kwargs["cache_position"] = torch.cat(
+                [cache_position, cache_position[-1:] + 1]
+            )
+    return model_kwargs
 
 
 def _require_models() -> None:
@@ -99,6 +138,11 @@ def _audio_pipeline() -> AudioLDM2Pipeline:
             torch_dtype=torch.float16,
             local_files_only=True,
         )
+        if not hasattr(pipe.language_model, "_update_model_kwargs_for_generation"):
+            pipe.language_model._update_model_kwargs_for_generation = MethodType(
+                _update_audio_model_kwargs,
+                pipe.language_model,
+            )
         pipe.enable_model_cpu_offload()
         _AUDIO_PIPELINE = pipe
     return _AUDIO_PIPELINE
