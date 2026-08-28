@@ -1,5 +1,5 @@
 {
-  "policy_version": 2,
+  "policy_version": 1,
   "comparison_group": "v1-v2-same-hardware",
   "minimum_vram_gb": 96,
   "maximum_secure_price_usd_per_hour": 2.5,
@@ -13,7 +13,7 @@
       "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
       "vram_gb": 96,
       "secure_price_usd_per_hour": 2.09,
-      "quantization": "fp8-cast"
+      "quantization": "bf16-with-component-offload"
     }
   ]
 }

@@ -41,10 +41,10 @@ checkpoint 的兼容性风险低。Ada/Hopper/Blackwell 自动使用 `fp8-cast`�
 
 ## GPU 选择范围
 
-选卡策略固定在 `gpu_policy.json`：至少 48GB VRAM，Secure Cloud 参考价上限约
-`$2.10/小时`，暂不使用 H100/H200。优先使用支持 FP8 的 L40/L40S、RTX 6000 Ada 和
-RTX PRO 6000 系列；A100 80GB 作为 BF16 回退。A40 和 RTX A6000 虽有 48GB，但不支持
-本链路的 FP8 路径，BF16 又过于贴近显存上限，因此不加入自动调度列表。
+为保证 V1/V2 用户投票处于相同硬件条件，选卡策略固定在 `gpu_policy.json`：只允许完整的
+`NVIDIA RTX PRO 6000 Blackwell Server Edition` 96GB，不允许 MIG 48GB 或其他型号回退，
+Secure Pod 价格上限 `$2.50/小时`，Serverless 价格上限 `$3.50/小时`。创建或修改 Endpoint 前必须重新检查实时价格与目标
+Volume 数据中心库存。
 
 ## 许可证与内容边界
 

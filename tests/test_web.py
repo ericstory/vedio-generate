@@ -308,3 +308,87 @@ def test_self_hosted_task_rejects_reference_before_provider(tmp_path: Path, monk
         )
     assert response.status_code == 422
     assert response.json()["detail"] == "自建模型首版暂不支持参考图"
+
+
+def test_wan_v2_uses_independent_provider_and_fixed_five_seconds(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    class FakeWan:
+        def create_text_video(self, **kwargs):
+            assert kwargs["model"] == "wan-2.2-a14b-adult-v2"
+            assert kwargs["duration"] == 5
+            return {"id": "wan-job-123", "status": "queued"}
+
+    def provider_client(provider: str):
+        assert provider == "runpod_wan"
+        yield FakeWan()
+
+    monkeypatch.setattr(web, "_provider_client", provider_client)
+    settings = replace(web_settings(tmp_path), wan_v2_enabled=True)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        response = client.post(
+            "/generate/api/tasks",
+            data={
+                "prompt": "电影感测试",
+                "model": "wan-2.2-a14b-adult-v2",
+                "duration": "5",
+                "resolution": "480p",
+                "ratio": "16:9",
+            },
+        )
+    assert response.status_code == 201
+    assert response.json()["task"]["provider"] == "runpod_wan"
+
+
+def test_wan_v2_is_hidden_and_rejected_until_enabled(tmp_path: Path) -> None:
+    app = create_app(web_settings(tmp_path))
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        page = client.get("/generate")
+        assert 'value="wan-2.2-a14b-adult-v2" disabled' in page.text
+        response = client.post(
+            "/generate/api/tasks",
+            data={
+                "prompt": "测试",
+                "model": "wan-2.2-a14b-adult-v2",
+                "duration": "5",
+            },
+        )
+    assert response.status_code == 503
+
+
+def test_completed_task_accepts_quality_vote(tmp_path: Path) -> None:
+    settings = web_settings(tmp_path)
+    store = TaskStore(settings.database_path)
+    store.create(
+        {
+            "id": "finished",
+            "prompt": "完成的视频",
+            "model": "pinkcherry-ltx-2.3-v1.8",
+            "ratio": "16:9",
+            "resolution": "480p",
+            "duration": 5,
+            "has_reference": 0,
+            "status": "succeeded",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        response = client.post(
+            "/generate/api/tasks/finished/vote", json={"vote": "up"}
+        )
+    assert response.status_code == 200
+    assert response.json()["task"]["quality_vote"] == 1

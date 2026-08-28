@@ -51,6 +51,7 @@
           <div class="control-group model-control"><span class="control-label">模型</span><select name="model" id="model" aria-label="生成模型">
             <optgroup label="自建云 GPU">
               <option value="pinkcherry-ltx-2.3-v1.8">自建 · PinkCherry LTX 2.3</option>
+              <option value="wan-2.2-a14b-adult-v2" __WAN_V2_OPTION_STATE__>自建 V2 · Wan 2.2 成人 LoRA</option>
             </optgroup>
             <optgroup label="BytePlus Seedance">
             <option value="seedance-2.5">Seedance 2.5</option>
@@ -69,11 +70,11 @@
             <div class="select-wrap"><span id="ratio-icon" class="ratio-icon landscape"></span><select name="ratio" id="ratio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></div>
           </div>
           <div class="control-group"><span class="control-label">清晰度</span><select id="resolution" name="resolution"><option>480p</option><option selected>720p</option><option>1080p</option></select></div>
-          <div class="control-group"><span class="control-label">时长</span><select name="duration"><option value="4">4 秒</option><option value="6" selected>6 秒</option><option value="8">8 秒</option><option value="10">10 秒</option><option value="12">12 秒</option><option value="15">15 秒</option></select></div>
+          <div class="control-group"><span class="control-label">时长</span><select id="duration" name="duration"><option value="4">4 秒</option><option value="5">5 秒</option><option value="6" selected>6 秒</option><option value="8">8 秒</option><option value="10">10 秒</option><option value="12">12 秒</option><option value="15">15 秒</option></select></div>
           <label id="audio-control" class="audio-toggle"><input id="generate-audio" type="checkbox" name="generate_audio" checked><span></span> 音效</label>
           <button id="submit-button" class="generate-button" type="submit"><span>✦</span> 开始生成</button>
         </div>
-        <p id="model-hint" class="model-hint" hidden><b>独立云 GPU 链路</b> · LTX 2.3 Distilled · 提示词直接生成同步音视频，首版不含参考图</p>
+        <p id="model-hint" class="model-hint" hidden><b>独立云 GPU 链路</b></p>
         <div class="composer-meta"><span id="char-count">0 / 3000</span><span>支持中文与英文描述</span></div>
       </form>
 
@@ -97,7 +98,7 @@
       <button class="back-button" id="back-button">← 返回创作</button>
       <div class="result-card">
         <div class="result-video" id="result-video"><div class="result-placeholder"><span class="loader"></span><b>正在创作中</b><small>通常需要几分钟，请稍候</small></div></div>
-        <div class="result-info"><span id="detail-status" class="status-pill">生成中</span><h2 id="detail-title"></h2><div id="detail-meta" class="detail-meta"></div><p id="detail-error" class="form-error"></p></div>
+        <div class="result-info"><span id="detail-status" class="status-pill">生成中</span><h2 id="detail-title"></h2><div id="detail-meta" class="detail-meta"></div><div id="quality-vote" class="quality-vote" hidden><span>这个模型的成片质量如何？</span><button type="button" data-vote="up">👍 好</button><button type="button" data-vote="down">👎 差</button></div><p id="detail-error" class="form-error"></p></div>
       </div>
     </section>
     <div id="toast" class="toast" role="status"></div>

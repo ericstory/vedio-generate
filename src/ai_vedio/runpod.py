@@ -99,15 +99,29 @@ class RunPodClient:
     def _normalize(body: dict[str, Any]) -> dict[str, Any]:
         output = body.get("output") if isinstance(body.get("output"), dict) else {}
         error = body.get("error") or output.get("error")
+        content = {"video_url": output.get("video_url")}
+        for key in (
+            "seed",
+            "model_id",
+            "model_version",
+            "workflow_version",
+            "adult_adapter_id",
+            "adult_adapter_version",
+            "adult_adapter_strength",
+            "gpu_name",
+            "inference_seconds",
+        ):
+            if output.get(key) is not None:
+                content[key] = output[key]
         return {
             "id": str(body.get("id") or ""),
             "status": _STATUS_MAP.get(str(body.get("status") or "").upper(), "processing"),
-            "content": {"video_url": output.get("video_url")},
+            "content": content,
             "error": error,
         }
 
     def create_text_video(self, *, prompt: str, model: str, **options: Any) -> dict[str, Any]:
-        if model != "pinkcherry-ltx-2.3-v1.8":
+        if model != self.settings.ui_model_id:
             raise ValueError(f"Unknown self-hosted model: {model}")
         payload = {
             "input": {
@@ -120,6 +134,14 @@ class RunPodClient:
                 "duration": options.get("duration", 6),
             },
         }
+        if self.settings.adult_adapter_id:
+            payload["input"].update(
+                {
+                    "adult_adapter_id": self.settings.adult_adapter_id,
+                    "adult_adapter_version": self.settings.adult_adapter_version,
+                    "adult_adapter_strength": self.settings.adult_adapter_strength,
+                }
+            )
         # Keep the endpoint hard-disabled between jobs because RunPod's idle scaler
         # has occasionally left this private worker allocated. A failed submission
         # closes the gate immediately; successful jobs are closed by the web guard.

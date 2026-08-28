@@ -13,6 +13,7 @@ class VideoDefaults:
 
 
 SUPPORTED_MODELS = (
+    "wan-2.2-a14b-adult-v2",
     "pinkcherry-ltx-2.3-v1.8",
     "seedance-2.5",
     "seedance-2-mini",
@@ -20,7 +21,14 @@ SUPPORTED_MODELS = (
     "seedance-2.0",
 )
 
-SELF_HOSTED_MODELS = frozenset({"pinkcherry-ltx-2.3-v1.8"})
+SELF_HOSTED_MODELS = frozenset({
+    "pinkcherry-ltx-2.3-v1.8",
+    "wan-2.2-a14b-adult-v2",
+})
+SELF_HOSTED_PROVIDERS = {
+    "pinkcherry-ltx-2.3-v1.8": "runpod",
+    "wan-2.2-a14b-adult-v2": "runpod_wan",
+}
 SEEDANCE_MODELS = frozenset(SUPPORTED_MODELS) - SELF_HOSTED_MODELS
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "expired"})

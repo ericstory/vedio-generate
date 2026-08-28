@@ -32,6 +32,7 @@ def test_frontend_exposes_all_supported_models() -> None:
     assert 'select name="model" id="model"' in markup
     assert 'type="hidden" name="model"' not in markup
     for model in (
+        "wan-2.2-a14b-adult-v2",
         "pinkcherry-ltx-2.3-v1.8",
         "seedance-2.5",
         "seedance-2-mini",
@@ -49,3 +50,13 @@ def test_frontend_switches_self_hosted_capabilities() -> None:
     assert "selfHostedModels" in script
     assert 'id="model-hint"' in markup
     assert "独立云 GPU 链路" in markup
+
+
+def test_frontend_has_quality_vote_controls() -> None:
+    root = Path(__file__).parents[1] / "src" / "ai_vedio" / "web_assets"
+    script = (root / "static" / "app.js").read_text(encoding="utf-8")
+    markup = (root / "index.html").read_text(encoding="utf-8")
+    assert 'id="quality-vote"' in markup
+    assert 'data-vote="up"' in markup
+    assert 'data-vote="down"' in markup
+    assert "/vote" in script

@@ -19,8 +19,13 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .capabilities import SELF_HOSTED_MODELS, SUPPORTED_MODELS
-from .config import PROJECT_ROOT, load_runpod_settings, load_settings
+from .capabilities import SELF_HOSTED_MODELS, SELF_HOSTED_PROVIDERS, SUPPORTED_MODELS
+from .config import (
+    PROJECT_ROOT,
+    load_runpod_settings,
+    load_settings,
+    load_wan_runpod_settings,
+)
 from .runpod import RunPodClient, RunPodError
 from .seedance import SeedanceClient, SeedanceError
 
@@ -50,6 +55,7 @@ class WebSettings:
     video_output_dir: Path | None = None
     runpod_cost_guard_enabled: bool = False
     runpod_cost_guard_poll_seconds: float = 8.0
+    wan_v2_enabled: bool = False
 
 
 def load_web_settings() -> WebSettings:
@@ -86,6 +92,7 @@ def load_web_settings() -> WebSettings:
         runpod_cost_guard_poll_seconds=float(
             os.getenv("RUNPOD_COST_GUARD_POLL_SECONDS", "8")
         ),
+        wan_v2_enabled=os.getenv("WAN_V2_ENABLED", "0") == "1",
     )
 
 
@@ -109,6 +116,8 @@ class TaskStore:
                     status TEXT NOT NULL,
                     video_url TEXT,
                     error TEXT,
+                    quality_vote INTEGER,
+                    provider_metadata TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -119,6 +128,10 @@ class TaskStore:
                 db.execute("ALTER TABLE tasks ADD COLUMN provider TEXT NOT NULL DEFAULT 'seedance'")
             if "provider_task_id" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN provider_task_id TEXT")
+            if "quality_vote" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN quality_vote INTEGER")
+            if "provider_metadata" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN provider_metadata TEXT")
             db.execute(
                 "UPDATE tasks SET provider_task_id=id WHERE provider_task_id IS NULL OR provider_task_id=''"
             )
@@ -148,19 +161,38 @@ class TaskStore:
         status = str(remote.get("status") or "processing")
         content = remote.get("content") or {}
         error = remote.get("error")
+        provider_metadata = {
+            key: value
+            for key, value in content.items()
+            if key != "video_url" and value is not None
+        }
         if isinstance(error, (dict, list)):
             error = json.dumps(error, ensure_ascii=False)
         with self.connect() as db:
             db.execute(
-                """UPDATE tasks SET status=?, video_url=?, error=?, updated_at=? WHERE id=?""",
+                """UPDATE tasks SET status=?, video_url=?, error=?, provider_metadata=?,
+                updated_at=? WHERE id=?""",
                 (
                     status,
                     content.get("video_url"),
                     str(error) if error else None,
+                    json.dumps(provider_metadata, ensure_ascii=False)
+                    if provider_metadata
+                    else None,
                     _now(),
                     task_id,
                 ),
             )
+
+    def vote(self, task_id: str, vote: int) -> dict[str, Any] | None:
+        if vote not in {-1, 1}:
+            raise ValueError("quality vote must be -1 or 1")
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE tasks SET quality_vote=?, updated_at=? WHERE id=? AND status='succeeded'",
+                (vote, _now(), task_id),
+            )
+        return self.get(task_id) if cursor.rowcount else None
 
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -174,14 +206,19 @@ class TaskStore:
             row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return _public_task(dict(row)) if row else None
 
-    def active_runpod(self) -> list[dict[str, Any]]:
+    def active_runpod(self, provider: str | None = None) -> list[dict[str, Any]]:
         placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
+        provider_clause = "provider LIKE 'runpod%'"
+        values: tuple[Any, ...] = tuple(sorted(TERMINAL_STATUSES))
+        if provider:
+            provider_clause = "provider=?"
+            values = (provider, *values)
         with self.connect() as db:
             rows = db.execute(
                 f"""SELECT * FROM tasks
-                WHERE provider='runpod' AND status NOT IN ({placeholders})
+                WHERE {provider_clause} AND status NOT IN ({placeholders})
                 ORDER BY created_at ASC""",
-                tuple(sorted(TERMINAL_STATUSES)),
+                values,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -192,6 +229,9 @@ def _now() -> str:
 
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     task["has_reference"] = bool(task.get("has_reference"))
+    if task.get("provider_metadata"):
+        with suppress(ValueError, TypeError):
+            task["provider_metadata"] = json.loads(task["provider_metadata"])
     return task
 
 
@@ -293,17 +333,33 @@ def _runpod_client() -> Iterator[RunPodClient]:
         client.close()
 
 
+def _wan_runpod_client() -> Iterator[RunPodClient]:
+    client = RunPodClient(load_wan_runpod_settings())
+    try:
+        yield client
+    finally:
+        client.close()
+
+
 def _provider_client(provider: str) -> Iterator[SeedanceClient | RunPodClient]:
     if provider == "runpod":
         return _runpod_client()
+    if provider == "runpod_wan":
+        return _wan_runpod_client()
     return _client()
 
 
-def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool:
+def _runpod_provider_cost_guard_tick(
+    store: TaskStore,
+    *,
+    provider: str,
+    client_factory: Any,
+    shutdown_if_idle: bool,
+) -> bool:
     """Poll active private jobs and explicitly close the GPU gate at terminal state."""
-    active_before = store.active_runpod()
+    active_before = store.active_runpod(provider)
     with suppress(SeedanceError, ValueError):
-        for client in _runpod_client():
+        for client in client_factory():
             for task in active_before:
                 remote_id = task.get("provider_task_id") or task["id"]
                 try:
@@ -322,13 +378,31 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
                         )
                     continue
                 store.update_remote(task["id"], remote)
-            active_after = bool(store.active_runpod())
+            active_after = bool(store.active_runpod(provider))
             if not active_after and (shutdown_if_idle or bool(active_before)):
                 client.set_workers_max(0)
             return active_after
     # On a provider outage, retain the prior active state and never shut down a
     # worker that may still be processing a job.
     return bool(active_before)
+
+
+def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool:
+    ltx_active = _runpod_provider_cost_guard_tick(
+        store,
+        provider="runpod",
+        client_factory=_runpod_client,
+        shutdown_if_idle=shutdown_if_idle,
+    )
+    wan_active = False
+    if os.getenv("RUNPOD_WAN_ENDPOINT_ID", "").strip():
+        wan_active = _runpod_provider_cost_guard_tick(
+            store,
+            provider="runpod_wan",
+            client_factory=_wan_runpod_client,
+            shutdown_if_idle=shutdown_if_idle,
+        )
+    return ltx_active or wan_active
 
 
 def create_app(web_settings: WebSettings | None = None) -> FastAPI:
@@ -370,7 +444,11 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
 
     def html_page(name: str) -> HTMLResponse:
         markup = (WEB_DIR / name).read_text(encoding="utf-8")
-        return HTMLResponse(markup.replace("__BASE_PATH__", settings.base_path))
+        markup = markup.replace("__BASE_PATH__", settings.base_path)
+        markup = markup.replace(
+            "__WAN_V2_OPTION_STATE__", "" if settings.wan_v2_enabled else "disabled"
+        )
+        return HTMLResponse(markup)
 
     @app.get(f"{settings.base_path}/healthz")
     async def health():
@@ -503,6 +581,19 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             tasks = store.list()
         return {"tasks": tasks}
 
+    @app.post(f"{settings.base_path}/api/tasks/{{task_id}}/vote")
+    async def vote_task(request: Request, task_id: str):
+        _require_auth(request)
+        data = await request.json()
+        vote = {"up": 1, "down": -1}.get(str(data.get("vote") or ""))
+        if vote is None:
+            raise HTTPException(status_code=422, detail="评分只支持 up 或 down")
+        store: TaskStore = request.app.state.store
+        task = store.vote(task_id, vote)
+        if task is None:
+            raise HTTPException(status_code=404, detail="仅可评价已完成的视频")
+        return {"task": task}
+
     @app.post(f"{settings.base_path}/api/tasks", status_code=201)
     async def create_task(
         request: Request,
@@ -524,15 +615,25 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="视频参数不受支持")
         is_self_hosted = model in SELF_HOSTED_MODELS
         store: TaskStore = request.app.state.store
-        if is_self_hosted and store.active_runpod():
+        provider = SELF_HOSTED_PROVIDERS.get(model, "seedance")
+        if is_self_hosted and store.active_runpod(provider):
             raise HTTPException(
                 status_code=429,
                 detail="自建 GPU 当前已有任务，请等待完成后再提交",
             )
         if is_self_hosted and resolution == "1080p":
             raise HTTPException(status_code=422, detail="自建模型首版仅支持 480p 或 720p")
-        if is_self_hosted and reference and reference.filename:
+        if model == "pinkcherry-ltx-2.3-v1.8" and reference and reference.filename:
             raise HTTPException(status_code=422, detail="自建模型首版暂不支持参考图")
+        if model == "wan-2.2-a14b-adult-v2":
+            if not settings.wan_v2_enabled:
+                raise HTTPException(status_code=503, detail="Wan V2 尚未启用")
+            if duration != 5:
+                raise HTTPException(status_code=422, detail="Wan V2 首版固定生成 5 秒")
+            if ratio not in {"16:9", "9:16"}:
+                raise HTTPException(status_code=422, detail="Wan V2 首版仅支持 16:9 或 9:16")
+            if reference and reference.filename:
+                raise HTTPException(status_code=422, detail="Wan V2 文生视频首版暂不接收参考图")
         image_data_url = None
         if reference and reference.filename:
             if reference.content_type not in ALLOWED_IMAGE_TYPES:
@@ -542,7 +643,6 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 raise HTTPException(status_code=413, detail="参考图不能超过 30MB")
             image_data_url = f"data:{reference.content_type};base64,{base64.b64encode(raw).decode()}"
         try:
-            provider = "runpod" if is_self_hosted else "seedance"
             for client in _provider_client(provider):
                 options = dict(
                     ratio=ratio,

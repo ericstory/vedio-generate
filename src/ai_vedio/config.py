@@ -57,6 +57,10 @@ class RunPodSettings:
     model_id: str = "SexGod1979/PinkCherry_NSFW_LTX23"
     model_version: str = "PinkCherry_FineTune_bf16_v1_8_LTX23"
     workflow_version: str = "pinkcherry-native-two-stage-v1"
+    ui_model_id: str = "pinkcherry-ltx-2.3-v1.8"
+    adult_adapter_id: str = ""
+    adult_adapter_version: str = ""
+    adult_adapter_strength: float = 1.0
 
 
 def load_settings(env_file: str | Path | None = None) -> Settings:
@@ -100,4 +104,34 @@ def load_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
         workflow_version=os.getenv(
             "SELF_HOSTED_WORKFLOW_VERSION", "pinkcherry-native-two-stage-v1"
         ),
+    )
+
+
+def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
+    """Load the independent Wan V2 endpoint without changing the LTX V1 contract."""
+    _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    return RunPodSettings(
+        api_key=_required("RUNPOD_API_KEY"),
+        endpoint_id=_required("RUNPOD_WAN_ENDPOINT_ID"),
+        api_base_url=os.getenv("RUNPOD_API_BASE_URL", "https://api.runpod.ai/v2").rstrip("/"),
+        management_api_base_url=os.getenv(
+            "RUNPOD_MANAGEMENT_API_BASE_URL", "https://rest.runpod.io/v1"
+        ).rstrip("/"),
+        model_id=os.getenv(
+            "WAN_MODEL_ID", "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+        ),
+        model_version=os.getenv(
+            "WAN_MODEL_VERSION", "5be7df9619b54f4e2667b2755bc6a756675b5cd7"
+        ),
+        workflow_version=os.getenv(
+            "WAN_WORKFLOW_VERSION", "wan22-t2v-adult-lora-v2"
+        ),
+        ui_model_id="wan-2.2-a14b-adult-v2",
+        adult_adapter_id=os.getenv(
+            "WAN_ADULT_ADAPTER_ID", "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
+        ),
+        adult_adapter_version=os.getenv(
+            "WAN_ADULT_ADAPTER_VERSION", "aeef17d7fa51d753ab7d1004ddb4f218a95d756d"
+        ),
+        adult_adapter_strength=float(os.getenv("WAN_ADULT_ADAPTER_STRENGTH", "0.9")),
     )

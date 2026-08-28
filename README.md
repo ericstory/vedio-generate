@@ -1,6 +1,7 @@
 # AI Vedio
 
-统一 UI、两条独立生产链路的视频生成平台：BytePlus Seedance，以及自建 RunPod GPU / LTX 2.3。
+统一 UI、三条独立生产链路的视频生成平台：BytePlus Seedance、自建 RunPod LTX 2.3 V1，
+以及自建 RunPod Wan 2.2 A14B + 强制成人 LoRA V2。
 
 > 目录名沿用 `ai-vedio`；Python 包名使用合法标识符 `ai_vedio`。
 
@@ -124,6 +125,17 @@ LTX 2.3 distilled LoRA、spatial upscaler 与 Gemma 3 文本编码器。所有�
 不进入应用镜像或 Git。
 
 该私有研究服务允许合规的成年人内容。
+
+## V2 质量链路规划
+
+当前 PinkCherry LTX 2.3 链路作为 V1 保留。第二条自建质量链路计划采用独立的 Wan 2.2
+A14B Worker、Endpoint 和模型卷，不原地替换 V1。模型判断、近期成片质量诊断、GPU/存储
+预算、固定 A/B 验收矩阵和付费边界见
+[`docs/video-pipeline-v2.md`](docs/video-pipeline-v2.md)。
+
+V2 Worker 已位于 `workers/wan-video/`：固定 5 秒 T2V，成人高/低噪声 LoRA 都是必选，
+并与 V1 统一限定到完整 RTX PRO 6000 Blackwell 96GB。生产开关 `WAN_V2_ENABLED` 默认关闭，
+必须在独立 Endpoint 完成真实 GPU 冒烟测试后才开启。
 
 ## 安全
 

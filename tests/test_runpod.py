@@ -9,6 +9,20 @@ def settings() -> RunPodSettings:
     return RunPodSettings(api_key="secret", endpoint_id="endpoint")
 
 
+def wan_settings() -> RunPodSettings:
+    return RunPodSettings(
+        api_key="secret",
+        endpoint_id="wan-endpoint",
+        model_id="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        model_version="wan-revision",
+        workflow_version="wan22-t2v-adult-lora-v2",
+        ui_model_id="wan-2.2-a14b-adult-v2",
+        adult_adapter_id="lopi999/Wan2.2-I2V_General-NSFW-LoRA",
+        adult_adapter_version="adapter-revision",
+        adult_adapter_strength=0.9,
+    )
+
+
 def test_runpod_client_submits_ltx_job_and_normalizes_status() -> None:
     requests = []
 
@@ -147,4 +161,36 @@ def test_submission_retries_endpoint_activation_propagation() -> None:
     assert result["id"] == "rp-retried"
     assert job_attempts == 3
     assert management_payloads == [{"workersMax": 1, "workersMin": 0}]
+    client.close()
+
+
+def test_wan_job_always_submits_locked_adult_adapter() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "wan-job", "status": "IN_QUEUE"})
+
+    client = RunPodClient(wan_settings())
+    client._client.close()
+    client._management_client.close()
+    client._client = httpx.Client(
+        base_url="https://api.runpod.ai/v2/wan-endpoint",
+        transport=httpx.MockTransport(handler),
+    )
+    client._management_client = httpx.Client(
+        base_url="https://rest.runpod.io/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    client.create_text_video(
+        prompt="测试",
+        model="wan-2.2-a14b-adult-v2",
+        ratio="16:9",
+        resolution="480p",
+        duration=5,
+    )
+    payload = __import__("json").loads(requests[1].content)["input"]
+    assert payload["adult_adapter_id"] == "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
+    assert payload["adult_adapter_version"] == "adapter-revision"
+    assert payload["adult_adapter_strength"] == 0.9
     client.close()

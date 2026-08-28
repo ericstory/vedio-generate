@@ -6,13 +6,14 @@ const statusMap = {
   cancelled: ['已取消', 'failed'], expired: ['已过期', 'failed']
 };
 const modelNames = {
+  'wan-2.2-a14b-adult-v2': '自建 V2 · Wan 2.2 成人 LoRA',
   'pinkcherry-ltx-2.3-v1.8': '自建 · PinkCherry LTX 2.3',
   'seedance-2.5': 'Seedance 2.5',
   'seedance-2-mini': 'Seedance 2.0 Mini',
   'seedance-2-fast': 'Seedance 2.0 Fast',
   'seedance-2.0': 'Seedance 2.0'
 };
-const selfHostedModels = new Set(['pinkcherry-ltx-2.3-v1.8']);
+const selfHostedModels = new Set(['pinkcherry-ltx-2.3-v1.8', 'wan-2.2-a14b-adult-v2']);
 
 function escapeHtml(value='') {
   const node = document.createElement('span'); node.textContent = value; return node.innerHTML;
@@ -84,6 +85,8 @@ function renderDetail(task) {
   $('#detail-title').textContent=task.prompt;
   $('#detail-meta').innerHTML=`<span>${escapeHtml(modelNames[task.model] || task.model)}</span><span>${task.ratio}</span><span>${task.resolution}</span><span>${task.duration} 秒</span><span>${task.has_reference?'含参考图':'文生视频'}</span>`;
   $('#detail-error').textContent=task.error || '';
+  const vote=$('#quality-vote'); vote.hidden=task.status!=='succeeded';
+  vote.querySelectorAll('button').forEach(button=>button.classList.toggle('selected', Number(task.quality_vote)===(button.dataset.vote==='up'?1:-1)));
   const container=$('#result-video');
   if(task.status==='succeeded' && task.video_url) container.innerHTML=`<video controls autoplay muted playsinline src="${escapeHtml(task.video_url)}"></video><a class="download-link" href="${escapeHtml(task.video_url)}" target="_blank" rel="noopener">打开原视频 ↗</a>`;
   else if(kind==='failed') container.innerHTML='<div class="result-placeholder failed-mark"><span>!</span><b>生成未完成</b><small>请检查失败原因后重新尝试</small></div>';
@@ -93,18 +96,32 @@ function resetComposer() { state.selected=null; renderTasks(); $('#detail-view')
 function openSidebar(){ $('#sidebar').classList.add('open'); $('#sidebar-scrim').classList.add('open'); }
 function closeSidebar(){ $('#sidebar').classList.remove('open'); $('#sidebar-scrim').classList.remove('open'); }
 function syncModelCapabilities() {
-  const selfHosted=selfHostedModels.has($('#model').value);
+  const model=$('#model').value; const selfHosted=selfHostedModels.has(model); const wan=model==='wan-2.2-a14b-adult-v2';
   const referenceControl=$('#reference-control'); const audio=$('#generate-audio');
   referenceControl.classList.toggle('disabled', selfHosted);
   $('#reference').disabled=selfHosted;
-  if(selfHosted){ clearReference(); audio.checked=true; audio.disabled=true; }
+  if(selfHosted){ clearReference(); audio.checked=!wan; audio.disabled=true; }
   else { audio.checked=true; audio.disabled=false; }
   $('#audio-control').hidden=selfHosted;
   $('#model-hint').hidden=!selfHosted;
   // LTX 2.3 MVP is benchmarked at 480p/720p; keep Seedance's 1080p option independent.
   Array.from($('#resolution').options).forEach(option=>{if(option.textContent==='1080p')option.disabled=selfHosted;});
   if(selfHosted && $('#resolution').value==='1080p') $('#resolution').value='720p';
+  Array.from($('#ratio').options).forEach(option=>option.disabled=wan && !['16:9','9:16'].includes(option.value));
+  if(wan && !['16:9','9:16'].includes($('#ratio').value)) $('#ratio').value='16:9';
+  Array.from($('#duration').options).forEach(option=>option.disabled=wan && option.value!=='5');
+  if(wan) $('#duration').value='5';
+  $('#model-hint').innerHTML=wan
+    ? '<b>独立云 GPU 质量链路</b> · Wan 2.2 A14B · 成人高/低噪声 LoRA 强制启用 · 5 秒无音频'
+    : '<b>独立云 GPU 链路</b> · LTX 2.3 Distilled · 提示词直接生成同步音视频，首版不含参考图';
 }
+
+$('#quality-vote').addEventListener('click', async event=>{
+  const button=event.target.closest('[data-vote]'); if(!button || !state.selected) return;
+  try { const result=await api(`./api/tasks/${state.selected}/vote`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vote:button.dataset.vote})});
+    const index=state.tasks.findIndex(task=>task.id===state.selected); if(index>=0) state.tasks[index]=result.task; renderDetail(result.task); renderTasks(); showToast('评分已记录');
+  } catch(err) { showToast(err.message,'error'); }
+});
 
 $('#generate-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form=event.currentTarget; const button=$('#submit-button'); button.disabled=true; button.innerHTML='<i class="mini-loader"></i> 提交中';
