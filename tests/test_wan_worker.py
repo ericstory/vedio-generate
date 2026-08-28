@@ -50,6 +50,12 @@ def test_wan_handler_forces_both_denoiser_adapters() -> None:
     assert "enable_model_cpu_offload" in source
 
 
+def test_wan_image_installs_complete_video_export_backend() -> None:
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert '"imageio-ffmpeg==0.6.0"' in dockerfile
+    assert '"imageio==2.37.0"' in dockerfile
+
+
 def test_v1_and_v2_use_the_same_full_96gb_gpu_policy() -> None:
     root = Path(__file__).parents[1] / "workers"
     ltx = json.loads((root / "ltx-video" / "gpu_policy.json").read_text())

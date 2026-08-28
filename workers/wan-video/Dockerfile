@@ -25,6 +25,10 @@ RUN pip install --break-system-packages --no-cache-dir \
     && pip install --break-system-packages --no-cache-dir --ignore-installed cryptography \
       "runpod>=1.8,<2"
 
+# Diffusers needs the imageio Python frontend in addition to imageio-ffmpeg.
+# A separate layer lets this small fix reuse the large CUDA/dependency layer.
+RUN pip install --break-system-packages --no-cache-dir "imageio==2.37.0"
+
 WORKDIR /app
 COPY handler.py worker_config.py download_models.sh /app/
 RUN chmod 0755 /app/download_models.sh
