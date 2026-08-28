@@ -4,16 +4,20 @@
 `Wan-AI/Wan2.2-T2V-A14B-Diffusers`，并强制加载成人 LoRA 的高噪声与低噪声两个权重。
 任一 LoRA 缺失都会阻止 Worker 启动，API 不提供关闭适配器的参数。
 
-## 固定生产规格
+## 生产规格
 
-- GPU：仅 `NVIDIA RTX PRO 6000 Blackwell Server Edition`，96GB；Secure Pod 上限 $2.50/h，
-  Serverless 上限 $3.50/h。
-- 输出：5 秒、24fps、121 帧；480p 或 720p；16:9 或 9:16；无音频。
+- GPU：RunPod 96GB Pro 池；当前真实验证落在 `NVIDIA RTX PRO 6000 Blackwell Server Edition`。
+- 输出：4/5/6/8/10/12/15 秒、16fps、按时长生成 `4N+1` 帧；480p 或 720p；
+  16:9、9:16、1:1、4:3、3:4 或 21:9。
+- 音频：`cvssp/audioldm2` 根据同一提示词生成同长度环境声/音效，最终 MP4 使用 AAC 音轨；
+  它不是口型同步对白模型。
 - 推理：BF16 完整双专家、40 steps、CFG 5.0、组件级 CPU offload。
-- Serverless：`workersMin=0`、`workersMax=1`、execution timeout 30 分钟。
+- Serverless：空闲 `workersMin=0`、`workersMax=0`；提交期间最多 1 个 worker；
+  execution timeout 120 分钟。
 - 模型卷：至少 150GB，挂载到 `/runpod-volume`。
 
-模型总下载约 127.43GB。挂载卷的临时 Pod 中执行：
+Wan 与 LoRA 总下载约 127.43GB；AudioLDM2 仅保存 safetensors、不保存重复 `.bin` 权重，
+额外约 4.6GB。挂载卷的临时 Pod 中执行：
 
 ```bash
 ./download_models.sh
@@ -31,7 +35,10 @@ WAN_ADULT_ADAPTER_STRENGTH=0.9
 WAN_ADULT_TRIGGER=nsfwsks
 WAN_INFERENCE_STEPS=40
 WAN_GUIDANCE_SCALE=5.0
-WAN_WORKFLOW_VERSION=wan22-t2v-adult-lora-v2
+WAN_AUDIO_MODEL_ROOT=/runpod-volume/models/Wan2.2-T2V-A14B-Adult-v2/audio/audioldm2
+WAN_AUDIO_INFERENCE_STEPS=50
+WAN_AUDIO_GUIDANCE_SCALE=3.5
+WAN_WORKFLOW_VERSION=wan22-t2v-adult-lora-audio-v3
 EAGER_LOAD_MODELS=1
 ```
 

@@ -133,9 +133,10 @@ A14B Worker、Endpoint 和模型卷，不原地替换 V1。模型判断、近期
 预算、固定 A/B 验收矩阵和付费边界见
 [`docs/video-pipeline-v2.md`](docs/video-pipeline-v2.md)。
 
-V2 Worker 已位于 `workers/wan-video/`：固定 5 秒 T2V，成人高/低噪声 LoRA 都是必选，
-并与 V1 统一限定到完整 RTX PRO 6000 Blackwell 96GB。生产开关 `WAN_V2_ENABLED` 默认关闭，
-必须在独立 Endpoint 完成真实 GPU 冒烟测试后才开启。
+V2 Worker 已位于 `workers/wan-video/`：支持 4–15 秒 T2V、全部六种 UI 画幅和 480p/720p，
+成人高/低噪声 LoRA 都是必选，并用 AudioLDM2 生成同长度环境声/音效后封装 AAC 音轨。
+V1、V2 使用相同的 RunPod 96GB Pro GPU 池。生产开关 `WAN_V2_ENABLED` 默认关闭，必须在
+独立 Endpoint 完成真实 GPU 冒烟测试后才开启。
 
 ## 安全
 

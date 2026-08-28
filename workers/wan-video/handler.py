@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 from typing import Any
@@ -9,12 +10,14 @@ from uuid import uuid4
 
 import boto3
 import httpx
+import numpy as np
 import runpod
 import torch
-from diffusers import AutoencoderKLWan, WanPipeline
+from diffusers import AudioLDM2Pipeline, AutoencoderKLWan, WanPipeline
 from diffusers.utils import export_to_video
+from scipy.io import wavfile
 
-from worker_config import FPS, NUM_FRAMES, dimensions, ensure_trigger, validate_prompt
+from worker_config import FPS, dimensions, ensure_trigger, frames_for_duration, validate_prompt
 
 
 MODEL_ROOT = Path(
@@ -29,7 +32,11 @@ ADAPTER_LOW = Path(
     os.getenv("WAN_ADAPTER_LOW_PATH", str(ADAPTER_ROOT / "NSFW-22-L-e8.safetensors"))
 )
 ADAPTER_STRENGTH = float(os.getenv("WAN_ADULT_ADAPTER_STRENGTH", "0.9"))
+AUDIO_MODEL_ROOT = Path(
+    os.getenv("WAN_AUDIO_MODEL_ROOT", str(MODEL_ROOT / "audio" / "audioldm2"))
+)
 _PIPELINE: WanPipeline | None = None
+_AUDIO_PIPELINE: AudioLDM2Pipeline | None = None
 
 
 def _require_models() -> None:
@@ -79,6 +86,75 @@ def _pipeline() -> WanPipeline:
         pipe.enable_model_cpu_offload()
         _PIPELINE = pipe
     return _PIPELINE
+
+
+def _audio_pipeline() -> AudioLDM2Pipeline:
+    """Load prompt-conditioned sound generation lazily after video inference."""
+    global _AUDIO_PIPELINE
+    if _AUDIO_PIPELINE is None:
+        if not (AUDIO_MODEL_ROOT / "model_index.json").is_file():
+            raise RuntimeError(f"Wan V2 audio model is missing: {AUDIO_MODEL_ROOT}")
+        pipe = AudioLDM2Pipeline.from_pretrained(
+            AUDIO_MODEL_ROOT,
+            torch_dtype=torch.float16,
+            local_files_only=True,
+        )
+        pipe.enable_model_cpu_offload()
+        _AUDIO_PIPELINE = pipe
+    return _AUDIO_PIPELINE
+
+
+def _generate_audio(prompt: str, path: Path, *, duration: int, seed: int) -> int:
+    audio_pipe = _audio_pipeline()
+    output = audio_pipe(
+        prompt=(
+            "high quality synchronized cinematic ambience and realistic sound effects, "
+            f"no music unless explicitly requested, scene: {prompt}"
+        ),
+        negative_prompt="low quality, distorted, clipping, harsh noise",
+        audio_length_in_s=float(duration) + 0.1,
+        num_inference_steps=int(os.getenv("WAN_AUDIO_INFERENCE_STEPS", "50")),
+        guidance_scale=float(os.getenv("WAN_AUDIO_GUIDANCE_SCALE", "3.5")),
+        generator=torch.Generator(device="cuda").manual_seed(seed ^ 0xA0D10),
+    ).audios[0]
+    sample_rate = int(audio_pipe.vocoder.config.sampling_rate)
+    waveform = np.asarray(output, dtype=np.float32).squeeze()
+    peak = float(np.max(np.abs(waveform))) if waveform.size else 0.0
+    if peak > 0:
+        waveform = waveform * (0.95 / peak)
+    wavfile.write(path, sample_rate, (waveform * 32767.0).astype(np.int16))
+    return sample_rate
+
+
+def _mux_audio(video_path: Path, audio_path: Path, output_path: Path) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video_path),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        check=True,
+    )
 
 
 def _upload(path: Path, key: str) -> str:
@@ -135,10 +211,11 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     prompt = str(params.get("prompt") or "").strip()
     validate_prompt(prompt)
     _validate_locked_adapter(params)
-    if int(params.get("duration", 5)) != 5:
-        raise ValueError("Wan V2 produces exactly 5 seconds per shot")
+    duration = int(params.get("duration", 5))
+    num_frames = frames_for_duration(duration)
     resolution = str(params.get("resolution") or "480p")
     width, height = dimensions(str(params.get("ratio") or "16:9"), resolution)
+    generate_audio = bool(params.get("generate_audio", True))
     seed = int(params.get("seed", -1))
     if seed < 0:
         seed = int.from_bytes(os.urandom(4), "big")
@@ -150,6 +227,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     )
 
     with tempfile.TemporaryDirectory(prefix="wan-job-") as directory:
+        video_only = Path(directory) / "video.mp4"
+        audio = Path(directory) / "audio.wav"
         output = Path(directory) / "output.mp4"
         started = time.monotonic()
         with torch.inference_mode():
@@ -158,12 +237,24 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
                 negative_prompt=negative_prompt,
                 width=width,
                 height=height,
-                num_frames=NUM_FRAMES,
+                num_frames=num_frames,
                 num_inference_steps=int(os.getenv("WAN_INFERENCE_STEPS", "40")),
                 guidance_scale=float(os.getenv("WAN_GUIDANCE_SCALE", "5.0")),
                 generator=torch.Generator(device="cuda").manual_seed(seed),
             ).frames[0]
-            export_to_video(frames, str(output), fps=FPS)
+            export_to_video(frames, str(video_only), fps=FPS)
+        sample_rate = None
+        if generate_audio:
+            torch.cuda.empty_cache()
+            sample_rate = _generate_audio(
+                prompt,
+                audio,
+                duration=duration,
+                seed=seed,
+            )
+            _mux_audio(video_only, audio, output)
+        else:
+            video_only.replace(output)
         inference_seconds = round(time.monotonic() - started, 3)
         key = f"videos/{job.get('id') or uuid4()}.mp4"
         return {
@@ -176,7 +267,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
                 "WAN_MODEL_VERSION", "5be7df9619b54f4e2667b2755bc6a756675b5cd7"
             ),
             "workflow_version": os.getenv(
-                "WAN_WORKFLOW_VERSION", "wan22-t2v-adult-lora-v2"
+                "WAN_WORKFLOW_VERSION", "wan22-t2v-adult-lora-audio-v3"
             ),
             "adult_adapter_id": os.getenv(
                 "WAN_ADULT_ADAPTER_ID", "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
@@ -187,6 +278,14 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "adult_adapter_strength": ADAPTER_STRENGTH,
             "gpu_name": torch.cuda.get_device_name(),
             "inference_seconds": inference_seconds,
+            "duration": duration,
+            "fps": FPS,
+            "frame_count": num_frames,
+            "width": width,
+            "height": height,
+            "has_audio": generate_audio,
+            "audio_model_id": "cvssp/audioldm2" if generate_audio else None,
+            "audio_sample_rate": sample_rate,
         }
 
 

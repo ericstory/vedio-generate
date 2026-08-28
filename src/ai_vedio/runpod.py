@@ -110,6 +110,14 @@ class RunPodClient:
             "adult_adapter_strength",
             "gpu_name",
             "inference_seconds",
+            "duration",
+            "fps",
+            "frame_count",
+            "width",
+            "height",
+            "has_audio",
+            "audio_model_id",
+            "audio_sample_rate",
         ):
             if output.get(key) is not None:
                 content[key] = output[key]
@@ -132,6 +140,7 @@ class RunPodClient:
                 "ratio": options.get("ratio", "16:9"),
                 "resolution": options.get("resolution", "720p"),
                 "duration": options.get("duration", 6),
+                "generate_audio": options.get("generate_audio", True),
             },
         }
         if self.settings.adult_adapter_id:

@@ -11,13 +11,13 @@ Worker 镜像、RunPod Serverless Endpoint、Network Volume、模型配置和成
 首轮验证顺序：
 
 1. 先用现有 V1 做 8/12/20 steps 的固定种子参数 A/B，不创建任何新基础设施。
-2. V2 使用官方 `Wan-AI/Wan2.2-T2V-A14B-Diffusers`，固定 5 秒，先验证 480p，再验证 720p。
+2. V2 使用官方 `Wan-AI/Wan2.2-T2V-A14B-Diffusers`，支持 4–15 秒，先验证 480p，再验证 720p。
 3. 成人 LoRA 是 V2 必选组件：高噪声与低噪声权重分别装入两个专家，不能由任务关闭。
 4. 用户对 V1/V2 成片投赞成或反对票，以真实投票数据决定后续默认模型。
 
-V2 的产品入口只接受一段提示词，生成固定 5 秒 T2V 镜头。长提示词应拆成多个单一镜头，
-分别生成后拼接。不要要求一个模型在单次 15 秒生成中同时完成多阶段动作、多人接触、对白、
-空间反转和复杂运镜。参考图增强留给后续 I2V 版本。
+V2 的产品入口接受一段提示词，单次生成 4–15 秒 T2V 镜头，并以同一提示词生成环境声/音效。
+15 秒长镜头已经进入产品能力，但复杂多阶段叙事仍建议拆镜头；AudioLDM2 生成的是氛围和音效，
+不承诺对白口型同步。参考图增强留给后续 I2V 版本。
 
 ## V1 已记录基线
 
@@ -81,10 +81,10 @@ Wan 2.2 A14B 是高/低噪声双专家 MoE，总参数约 27B、每步激活约 
       ├─ seedance-*              → BytePlus（现有）
       ├─ pinkcherry-ltx-v1       → RunPod LTX Endpoint（现有）
       └─ wan-quality-v2          → RunPod Wan Endpoint（新增、独立）
-                                    ├─ prompt planner：长提示词拆为 5 秒镜头
                                     ├─ Wan 2.2 T2V-A14B 双专家
                                     ├─ mandatory adult high/low LoRA
-                                    └─ stitch/encode → 受认证内部上传接口
+                                    ├─ AudioLDM2 环境声/音效
+                                    └─ AAC mux/encode → 受认证内部上传接口
 ```
 
 隔离要求：
@@ -95,7 +95,7 @@ Wan 2.2 A14B 是高/低噪声双专家 MoE，总参数约 27B、每步激活约 
 - 新模型卷不复用现有 100GB PinkCherry 卷。
 - 任务记录必须保存 provider、模型 revision、adapter revision、seed、steps、尺寸、帧数、
   推理秒数和 GPU 类型，才能复现和比较。
-- V2 初期不生成音频；需要音频时作为独立后处理，不让音频能力绑架画面模型选择。
+- 音频是独立后处理模型，画面仍由 Wan 决定；任务可关闭音效以缩短生成时间。
 
 ## 存储与 GPU
 

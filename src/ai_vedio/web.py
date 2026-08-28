@@ -628,10 +628,6 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         if model == "wan-2.2-a14b-adult-v2":
             if not settings.wan_v2_enabled:
                 raise HTTPException(status_code=503, detail="Wan V2 尚未启用")
-            if duration != 5:
-                raise HTTPException(status_code=422, detail="Wan V2 首版固定生成 5 秒")
-            if ratio not in {"16:9", "9:16"}:
-                raise HTTPException(status_code=422, detail="Wan V2 首版仅支持 16:9 或 9:16")
             if reference and reference.filename:
                 raise HTTPException(status_code=422, detail="Wan V2 文生视频首版暂不接收参考图")
         image_data_url = None

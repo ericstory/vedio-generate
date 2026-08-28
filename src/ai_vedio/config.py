@@ -124,7 +124,7 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
             "WAN_MODEL_VERSION", "5be7df9619b54f4e2667b2755bc6a756675b5cd7"
         ),
         workflow_version=os.getenv(
-            "WAN_WORKFLOW_VERSION", "wan22-t2v-adult-lora-v2"
+            "WAN_WORKFLOW_VERSION", "wan22-t2v-adult-lora-audio-v3"
         ),
         ui_model_id="wan-2.2-a14b-adult-v2",
         adult_adapter_id=os.getenv(

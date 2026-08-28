@@ -100,19 +100,17 @@ function syncModelCapabilities() {
   const referenceControl=$('#reference-control'); const audio=$('#generate-audio');
   referenceControl.classList.toggle('disabled', selfHosted);
   $('#reference').disabled=selfHosted;
-  if(selfHosted){ clearReference(); audio.checked=!wan; audio.disabled=true; }
+  if(selfHosted){ clearReference(); audio.checked=true; audio.disabled=!wan; }
   else { audio.checked=true; audio.disabled=false; }
-  $('#audio-control').hidden=selfHosted;
+  $('#audio-control').hidden=selfHosted && !wan;
   $('#model-hint').hidden=!selfHosted;
   // LTX 2.3 MVP is benchmarked at 480p/720p; keep Seedance's 1080p option independent.
   Array.from($('#resolution').options).forEach(option=>{if(option.textContent==='1080p')option.disabled=selfHosted;});
   if(selfHosted && $('#resolution').value==='1080p') $('#resolution').value='720p';
-  Array.from($('#ratio').options).forEach(option=>option.disabled=wan && !['16:9','9:16'].includes(option.value));
-  if(wan && !['16:9','9:16'].includes($('#ratio').value)) $('#ratio').value='16:9';
-  Array.from($('#duration').options).forEach(option=>option.disabled=wan && option.value!=='5');
-  if(wan) $('#duration').value='5';
+  Array.from($('#ratio').options).forEach(option=>option.disabled=false);
+  Array.from($('#duration').options).forEach(option=>option.disabled=false);
   $('#model-hint').innerHTML=wan
-    ? '<b>独立云 GPU 质量链路</b> · Wan 2.2 A14B · 成人高/低噪声 LoRA 强制启用 · 5 秒无音频'
+    ? '<b>独立云 GPU 质量链路</b> · Wan 2.2 A14B · 成人双 LoRA · 4–15 秒 · 全画幅 · AI 生成音效'
     : '<b>独立云 GPU 链路</b> · LTX 2.3 Distilled · 提示词直接生成同步音视频，首版不含参考图';
 }
 

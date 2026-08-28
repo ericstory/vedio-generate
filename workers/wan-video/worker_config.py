@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 
 
-FPS = 24
-NUM_FRAMES = 121
+FPS = 16
+ALLOWED_DURATIONS = (4, 5, 6, 8, 10, 12, 15)
 
 _SEXUAL_TERMS = re.compile(
     r"\b(sex|sexual|nude|naked|porn|explicit|erotic)\b|色情|裸体|性爱|性交|裸露",
@@ -40,13 +40,35 @@ def validate_prompt(prompt: str) -> None:
 
 def dimensions(ratio: str, resolution: str) -> tuple[int, int]:
     sizes = {
-        "480p": {"16:9": (832, 480), "9:16": (480, 832)},
-        "720p": {"16:9": (1280, 720), "9:16": (720, 1280)},
+        "480p": {
+            "16:9": (832, 480),
+            "9:16": (480, 832),
+            "1:1": (480, 480),
+            "4:3": (640, 480),
+            "3:4": (480, 640),
+            "21:9": (1120, 480),
+        },
+        "720p": {
+            "16:9": (1280, 720),
+            "9:16": (720, 1280),
+            "1:1": (720, 720),
+            "4:3": (960, 720),
+            "3:4": (720, 960),
+            "21:9": (1680, 720),
+        },
     }
     try:
         return sizes[resolution][ratio]
     except KeyError as exc:
         raise ValueError(f"unsupported Wan resolution/ratio: {resolution}/{ratio}") from exc
+
+
+def frames_for_duration(duration: int) -> int:
+    if duration not in ALLOWED_DURATIONS:
+        raise ValueError(f"unsupported Wan duration: {duration}")
+    # Wan's temporal VAE expects 4N+1 frames. Every supported whole-second
+    # duration at 16 fps naturally lands on that grid.
+    return duration * FPS + 1
 
 
 def ensure_trigger(prompt: str, trigger: str = "nsfwsks") -> str:

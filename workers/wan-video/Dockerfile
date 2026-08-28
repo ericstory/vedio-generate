@@ -19,6 +19,7 @@ RUN pip install --break-system-packages --no-cache-dir \
       "safetensors==0.8.0" \
       "huggingface-hub==1.29.0" \
       "imageio-ffmpeg==0.6.0" \
+      "scipy==1.17.0" \
       "ftfy>=6.3,<7" \
       "boto3>=1.40,<2" \
       "httpx>=0.28,<1" \

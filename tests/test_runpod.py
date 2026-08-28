@@ -188,9 +188,11 @@ def test_wan_job_always_submits_locked_adult_adapter() -> None:
         ratio="16:9",
         resolution="480p",
         duration=5,
+        generate_audio=True,
     )
     payload = __import__("json").loads(requests[1].content)["input"]
     assert payload["adult_adapter_id"] == "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
     assert payload["adult_adapter_version"] == "adapter-revision"
     assert payload["adult_adapter_strength"] == 0.9
+    assert payload["generate_audio"] is True
     client.close()

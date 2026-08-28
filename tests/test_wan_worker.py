@@ -18,12 +18,19 @@ def load_worker_config():
     return module
 
 
-def test_wan_dimensions_and_fixed_frame_count() -> None:
+def test_wan_dimensions_and_dynamic_frame_count() -> None:
     config = load_worker_config()
     assert config.dimensions("16:9", "480p") == (832, 480)
     assert config.dimensions("9:16", "720p") == (720, 1280)
-    assert config.NUM_FRAMES == 121
-    assert config.FPS == 24
+    assert config.dimensions("1:1", "720p") == (720, 720)
+    assert config.dimensions("4:3", "480p") == (640, 480)
+    assert config.dimensions("3:4", "480p") == (480, 640)
+    assert config.dimensions("21:9", "720p") == (1680, 720)
+    assert config.frames_for_duration(4) == 65
+    assert config.frames_for_duration(15) == 241
+    assert config.FPS == 16
+    with pytest.raises(ValueError):
+        config.frames_for_duration(7)
 
 
 def test_wan_prompt_trigger_is_mandatory_and_idempotent() -> None:
@@ -54,6 +61,16 @@ def test_wan_image_installs_complete_video_export_backend() -> None:
     dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert '"imageio-ffmpeg==0.6.0"' in dockerfile
     assert '"imageio==2.37.0"' in dockerfile
+    assert '"scipy==1.17.0"' in dockerfile
+
+
+def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert "AudioLDM2Pipeline" in source
+    assert '"cvssp/audioldm2"' in source
+    assert '"-c:a",' in source
+    assert '"aac",' in source
+    assert '"has_audio": generate_audio' in source
 
 
 def test_v1_and_v2_use_the_same_full_96gb_gpu_policy() -> None:

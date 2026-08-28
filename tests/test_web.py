@@ -310,13 +310,15 @@ def test_self_hosted_task_rejects_reference_before_provider(tmp_path: Path, monk
     assert response.json()["detail"] == "自建模型首版暂不支持参考图"
 
 
-def test_wan_v2_uses_independent_provider_and_fixed_five_seconds(
+def test_wan_v2_uses_independent_provider_with_long_audio_video(
     tmp_path: Path, monkeypatch,
 ) -> None:
     class FakeWan:
         def create_text_video(self, **kwargs):
             assert kwargs["model"] == "wan-2.2-a14b-adult-v2"
-            assert kwargs["duration"] == 5
+            assert kwargs["duration"] == 15
+            assert kwargs["ratio"] == "21:9"
+            assert kwargs["generate_audio"] is True
             return {"id": "wan-job-123", "status": "queued"}
 
     def provider_client(provider: str):
@@ -336,9 +338,10 @@ def test_wan_v2_uses_independent_provider_and_fixed_five_seconds(
             data={
                 "prompt": "电影感测试",
                 "model": "wan-2.2-a14b-adult-v2",
-                "duration": "5",
+                "duration": "15",
                 "resolution": "480p",
-                "ratio": "16:9",
+                "ratio": "21:9",
+                "generate_audio": "true",
             },
         )
     assert response.status_code == 201

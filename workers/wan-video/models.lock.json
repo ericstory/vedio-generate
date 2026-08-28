@@ -1,6 +1,6 @@
 {
   "layout_version": 1,
-  "expected_download_bytes": 127427661630,
+  "expected_download_bytes": 131908621076,
   "artifacts": [
     {
       "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
@@ -23,6 +23,14 @@
       "path": "NSFW-22-L-e8.safetensors",
       "size": 613516752,
       "sha256": "d6b783742f4d5fd63a0223ae1d5bf64fc995a6b408480ac2a00528ae0d4146db"
+    },
+    {
+      "repo": "cvssp/audioldm2",
+      "revision": "c8e7e189d324425c05c4c2f81214041ef4107983",
+      "path": "* (excluding *.bin)",
+      "size": 4480959446,
+      "sha256": null,
+      "note": "Safetensors-only snapshot; duplicate PyTorch .bin weights are excluded."
     }
   ]
 }
