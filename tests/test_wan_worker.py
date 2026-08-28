@@ -59,6 +59,8 @@ def test_wan_handler_forces_both_denoiser_adapters() -> None:
 
 def test_wan_image_installs_complete_video_export_backend() -> None:
     dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert '"transformers==5.16.1"' in dockerfile
+    assert '"huggingface-hub==1.29.0"' in dockerfile
     assert '"imageio-ffmpeg==0.6.0"' in dockerfile
     assert '"imageio==2.37.0"' in dockerfile
     assert '"scipy==1.17.0"' in dockerfile
@@ -67,6 +69,8 @@ def test_wan_image_installs_complete_video_export_backend() -> None:
 def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert "AudioLDM2Pipeline" in source
+    assert "_update_audio_model_kwargs" in source
+    assert "MethodType" in source
     assert '"cvssp/audioldm2"' in source
     assert '"-c:a",' in source
     assert '"aac",' in source
