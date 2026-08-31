@@ -73,6 +73,8 @@ class RunPodPodSettings:
     api_base_url: str = "https://rest.runpod.io/v1"
     gpu_id: str = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
     data_center_id: str = "US-KS-2"
+    fallback_data_center_id: str = ""
+    fallback_network_volume_id: str = ""
     volume_mount_path: str = "/runpod-volume"
     maximum_price_per_hour: float = 3.0
     maximum_runtime_seconds: int = 1800
@@ -174,6 +176,12 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
             "NVIDIA RTX PRO 6000 Blackwell Server Edition",
         ),
         data_center_id=os.getenv("RUNPOD_WAN_POD_DATA_CENTER_ID", "US-KS-2"),
+        fallback_data_center_id=os.getenv(
+            "RUNPOD_WAN_POD_FALLBACK_DATA_CENTER_ID", ""
+        ),
+        fallback_network_volume_id=os.getenv(
+            "RUNPOD_WAN_POD_FALLBACK_NETWORK_VOLUME_ID", ""
+        ),
         maximum_price_per_hour=float(
             os.getenv("RUNPOD_WAN_POD_MAX_PRICE_PER_HOUR", "3.0")
         ),

@@ -268,16 +268,44 @@ class RunPodPodClient:
             "gpuTypeIds": [self.settings.gpu_id],
             "gpuTypePriority": "custom",
             "gpuCount": 1,
-            "dataCenterIds": [self.settings.data_center_id],
             "dataCenterPriority": "custom",
             "allowedCudaVersions": ["13.0"],
-            "networkVolumeId": self.settings.network_volume_id,
             "volumeMountPath": self.settings.volume_mount_path,
             "containerDiskInGb": 20,
             "volumeInGb": 0,
             "env": pod_env,
         }
-        pod = self._request("POST", "/pods", json=payload)
+        lanes = [(self.settings.data_center_id, self.settings.network_volume_id)]
+        if (
+            self.settings.fallback_data_center_id
+            and self.settings.fallback_network_volume_id
+        ):
+            lanes.append(
+                (
+                    self.settings.fallback_data_center_id,
+                    self.settings.fallback_network_volume_id,
+                )
+            )
+        pod: dict[str, Any] | None = None
+        selected_data_center = ""
+        last_capacity_error: RunPodError | None = None
+        for data_center_id, network_volume_id in lanes:
+            lane_payload = {
+                **payload,
+                "dataCenterIds": [data_center_id],
+                "networkVolumeId": network_volume_id,
+            }
+            try:
+                pod = self._request("POST", "/pods", json=lane_payload)
+                selected_data_center = data_center_id
+                break
+            except RunPodError as exc:
+                if "no instances currently available" not in exc.upstream_message.lower():
+                    raise
+                last_capacity_error = exc
+        if pod is None:
+            assert last_capacity_error is not None
+            raise last_capacity_error
         pod_id = str(pod.get("id") or "")
         if not pod_id:
             raise RunPodError("RunPod 创建 Pod 后未返回编号")
@@ -303,6 +331,7 @@ class RunPodPodClient:
                 "video_url": None,
                 "gpu_name": self.settings.gpu_id,
                 "pod_price_per_hour": price,
+                "pod_data_center_id": selected_data_center,
             },
             "error": None,
         }

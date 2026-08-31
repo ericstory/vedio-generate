@@ -30,6 +30,8 @@ def wan_pod_settings() -> RunPodPodSettings:
         network_volume_id="volume",
         callback_url="https://private.example/generate/api/internal/pod-result",
         callback_token="callback-secret",
+        fallback_data_center_id="US-NE-1",
+        fallback_network_volume_id="fallback-volume",
     )
 
 
@@ -292,4 +294,46 @@ def test_wan_pod_is_deleted_when_actual_price_exceeds_cap() -> None:
         ("POST", "/v1/pods"),
         ("DELETE", "/v1/pods/over-cap"),
     ]
+    client.close()
+
+
+def test_wan_pod_retries_only_the_pinned_fallback_volume_on_capacity_error() -> None:
+    posted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"env": {}})
+        payload = __import__("json").loads(request.content)
+        posted.append(payload)
+        if len(posted) == 1:
+            return httpx.Response(
+                500,
+                json={"error": "create pod: There are no instances currently available"},
+            )
+        return httpx.Response(
+            201,
+            json={
+                "id": "fallback-pod",
+                "costPerHr": 2.09,
+                "machine": {"gpuId": "NVIDIA RTX PRO 6000 Blackwell Server Edition"},
+            },
+        )
+
+    client = RunPodPodClient(wan_pod_settings())
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="https://rest.runpod.io/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    result = client.create_text_video(
+        prompt="测试",
+        model="wan-2.2-a14b-adult-v2",
+        task_id="local-task",
+    )
+    assert result["id"] == "fallback-pod"
+    assert result["content"]["pod_data_center_id"] == "US-NE-1"
+    assert posted[0]["dataCenterIds"] == ["US-KS-2"]
+    assert posted[0]["networkVolumeId"] == "volume"
+    assert posted[1]["dataCenterIds"] == ["US-NE-1"]
+    assert posted[1]["networkVolumeId"] == "fallback-volume"
     client.close()
