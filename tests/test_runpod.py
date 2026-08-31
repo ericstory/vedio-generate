@@ -257,7 +257,7 @@ def test_wan_pod_uses_exact_gpu_volume_callback_and_price_cap() -> None:
     assert payload["gpu"] == {
         "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
         "count": 1,
-        "allowedCudaVersions": ["13.0"],  # rp-migrate: ignore
+        "minCudaVersion": "13.0",
     }
     assert payload["mounts"]["network"] == [
         {"volumeId": "volume", "path": "/runpod-volume"}
