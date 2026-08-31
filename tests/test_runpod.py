@@ -257,7 +257,7 @@ def test_wan_pod_uses_exact_gpu_volume_callback_and_price_cap() -> None:
     assert payload["gpu"] == {
         "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
         "count": 1,
-        "allowedCudaVersions": ["13.0"],
+        "allowedCudaVersions": ["13.0"],  # rp-migrate: ignore
     }
     assert payload["mounts"]["network"] == [
         {"volumeId": "volume", "path": "/runpod-volume"}
@@ -303,6 +303,7 @@ def test_wan_pod_is_deleted_when_actual_price_exceeds_cap() -> None:
 
 
 def test_runpod_v1_rollback_keeps_legacy_endpoint_gate_shape() -> None:
+    # rp-migrate: keep-v1 start
     requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -328,6 +329,7 @@ def test_runpod_v1_rollback_keeps_legacy_endpoint_gate_shape() -> None:
         "workersMin": 0,
     }
     client.close()
+    # rp-migrate: keep-v1 end
 
 
 def test_wan_pod_retries_each_pinned_region_volume_on_capacity_error() -> None:
