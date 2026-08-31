@@ -30,10 +30,13 @@ RUN pip install --break-system-packages --no-cache-dir "accelerate>=1.6,<2"
 
 # SGLang defaults SM12.x (RTX PRO 6000 Blackwell) to plain Torch SDPA because
 # its FlashAttention wheels do not cover that arch. SageAttention 2.2 provides
-# the fast quantized attention path there; kernels are compiled for SM12.0 at
-# image build time, so no GPU is needed on the build host.
-RUN TORCH_CUDA_ARCH_LIST="12.0" pip install --break-system-packages --no-cache-dir \
-      --no-build-isolation "sageattention==2.2.0" \
+# the fast quantized attention path there; PyPI only hosts 1.x, so it builds
+# from the pinned v2.2.0 source with kernels compiled for SM12.0 at image
+# build time — no GPU is needed on the build host.
+RUN nvcc --version \
+    && TORCH_CUDA_ARCH_LIST="12.0" MAX_JOBS=2 pip install --break-system-packages \
+      --no-cache-dir --no-build-isolation \
+      "sageattention @ git+https://github.com/thu-ml/SageAttention.git@eb615cf6cf4d221338033340ee2de1c37fbdba4a" \
     && python -c "import sageattention"
 
 WORKDIR /app

@@ -74,7 +74,9 @@ def test_wan_image_installs_accelerate_for_audio_cpu_offload() -> None:
 
 def test_wan_image_ships_sage_attention_for_blackwell() -> None:
     dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert '"sageattention==2.2.0"' in dockerfile
+    assert (
+        "SageAttention.git@eb615cf6cf4d221338033340ee2de1c37fbdba4a" in dockerfile
+    )
     assert 'TORCH_CUDA_ARCH_LIST="12.0"' in dockerfile
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert "import sageattention" in source
