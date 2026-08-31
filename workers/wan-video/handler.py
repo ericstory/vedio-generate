@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -14,15 +15,15 @@ import httpx
 import numpy as np
 import runpod
 import torch
-from diffusers import AudioLDM2Pipeline, AutoencoderKLWan, WanPipeline
-from diffusers.utils import export_to_video
+from diffusers import AudioLDM2Pipeline
 from scipy.io import wavfile
+from sglang.multimodal_gen import DiffGenerator
 
 from worker_config import FPS, dimensions, ensure_trigger, frames_for_duration, validate_prompt
 
 
 MODEL_ROOT = Path(
-    os.getenv("MODEL_ROOT", "/runpod-volume/models/Wan2.2-T2V-A14B-Adult-v2")
+    os.getenv("MODEL_ROOT", "/runpod-volume/models/Wan2.2-T2V-A14B-Adult-FP8-v4")
 )
 BASE_MODEL_ROOT = Path(os.getenv("WAN_BASE_MODEL_ROOT", str(MODEL_ROOT / "base")))
 ADAPTER_ROOT = Path(os.getenv("WAN_ADAPTER_ROOT", str(MODEL_ROOT / "adult-lora")))
@@ -36,8 +37,17 @@ ADAPTER_STRENGTH = float(os.getenv("WAN_ADULT_ADAPTER_STRENGTH", "0.9"))
 AUDIO_MODEL_ROOT = Path(
     os.getenv("WAN_AUDIO_MODEL_ROOT", str(MODEL_ROOT / "audio" / "audioldm2"))
 )
-_PIPELINE: WanPipeline | None = None
+_GENERATOR: DiffGenerator | None = None
 _AUDIO_PIPELINE: AudioLDM2Pipeline | None = None
+
+
+def _progress(job: dict[str, Any], stage: str, **details: Any) -> None:
+    """Emit stage timing without logging the user's prompt."""
+    payload = {"stage": stage, **details}
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    progress_update = getattr(runpod.serverless, "progress_update", None)
+    if callable(progress_update):
+        progress_update(job, payload)
 
 
 def _update_audio_model_kwargs(
@@ -88,43 +98,36 @@ def _require_models() -> None:
         )
 
 
-def _pipeline() -> WanPipeline:
-    """Load the full two-expert model and mandatory adapters once per warm worker."""
-    global _PIPELINE
-    if _PIPELINE is None:
+def _generator() -> DiffGenerator:
+    """Keep the FP8 denoisers resident and offload only auxiliary components."""
+    global _GENERATOR
+    if _GENERATOR is None:
         _require_models()
-        vae = AutoencoderKLWan.from_pretrained(
-            BASE_MODEL_ROOT,
-            subfolder="vae",
-            torch_dtype=torch.float32,
-            local_files_only=True,
+        generator = DiffGenerator.from_pretrained(
+            model_path=str(BASE_MODEL_ROOT),
+            num_gpus=1,
+            performance_mode="manual",
+            attention_backend=os.getenv("WAN_ATTENTION_BACKEND", "fa"),
+            dit_cpu_offload=False,
+            dit_layerwise_offload=False,
+            text_encoder_cpu_offload=True,
+            vae_cpu_offload=True,
+            pin_cpu_memory=True,
+            enable_torch_compile=False,
+            warmup_mode="off",
+            lora_merge_mode="dynamic",
         )
-        pipe = WanPipeline.from_pretrained(
-            BASE_MODEL_ROOT,
-            vae=vae,
-            torch_dtype=torch.bfloat16,
-            local_files_only=True,
+        # Static FP8 weights cannot be destructively merged with LoRA. Dynamic
+        # application preserves the quantized base and addresses both Wan 2.2 experts.
+        generator.set_lora(
+            ["adult_high", "adult_low"],
+            [str(ADAPTER_HIGH), str(ADAPTER_LOW)],
+            target=["transformer", "transformer_2"],
+            strength=[ADAPTER_STRENGTH, ADAPTER_STRENGTH],
+            merge_mode="dynamic",
         )
-        pipe.load_lora_weights(
-            ADAPTER_ROOT,
-            weight_name=ADAPTER_HIGH.name,
-            adapter_name="adult_high",
-        )
-        pipe.load_lora_weights(
-            ADAPTER_ROOT,
-            weight_name=ADAPTER_LOW.name,
-            adapter_name="adult_low",
-            load_into_transformer_2=True,
-        )
-        pipe.transformer.set_adapters(["adult_high"], weights=[ADAPTER_STRENGTH])
-        if pipe.transformer_2 is None:
-            raise RuntimeError("Wan 2.2 low-noise transformer is missing")
-        pipe.transformer_2.set_adapters(["adult_low"], weights=[ADAPTER_STRENGTH])
-        # The BF16 repository is ~126GB. Component offload keeps both experts available
-        # while each denoising stage still executes on the selected 96GB GPU.
-        pipe.enable_model_cpu_offload()
-        _PIPELINE = pipe
-    return _PIPELINE
+        _GENERATOR = generator
+    return _GENERATOR
 
 
 def _audio_pipeline() -> AudioLDM2Pipeline:
@@ -275,21 +278,39 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         audio = Path(directory) / "audio.wav"
         output = Path(directory) / "output.mp4"
         started = time.monotonic()
-        with torch.inference_mode():
-            frames = _pipeline()(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_frames=num_frames,
-                num_inference_steps=int(os.getenv("WAN_INFERENCE_STEPS", "40")),
-                guidance_scale=float(os.getenv("WAN_GUIDANCE_SCALE", "5.0")),
-                generator=torch.Generator(device="cuda").manual_seed(seed),
-            ).frames[0]
-            export_to_video(frames, str(video_only), fps=FPS)
+        _progress(job, "video_start", width=width, height=height, frames=num_frames)
+        video_started = time.monotonic()
+        generation = _generator().generate(
+            sampling_params_kwargs={
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "width": width,
+                "height": height,
+                "num_frames": num_frames,
+                "fps": FPS,
+                "num_inference_steps": int(os.getenv("WAN_INFERENCE_STEPS", "40")),
+                "guidance_scale": float(os.getenv("WAN_GUIDANCE_SCALE", "4.0")),
+                "guidance_scale_2": float(os.getenv("WAN_GUIDANCE_SCALE_2", "3.0")),
+                "seed": seed,
+                "save_output": True,
+                "return_file_paths_only": True,
+                "output_path": directory,
+                "output_file_name": video_only.name,
+            }
+        )
+        if generation is None or not generation.output_file_path:
+            raise RuntimeError("SGLang returned no Wan video output")
+        video_only = Path(generation.output_file_path)
+        if not video_only.is_file():
+            raise RuntimeError(f"SGLang output is missing: {video_only}")
+        video_seconds = round(time.monotonic() - video_started, 3)
+        _progress(job, "video_done", seconds=video_seconds)
         sample_rate = None
+        audio_seconds = 0.0
         if generate_audio:
             torch.cuda.empty_cache()
+            _progress(job, "audio_start")
+            audio_started = time.monotonic()
             sample_rate = _generate_audio(
                 prompt,
                 audio,
@@ -297,21 +318,26 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
                 seed=seed,
             )
             _mux_audio(video_only, audio, output)
+            audio_seconds = round(time.monotonic() - audio_started, 3)
+            _progress(job, "audio_done", seconds=audio_seconds)
         else:
             video_only.replace(output)
         inference_seconds = round(time.monotonic() - started, 3)
         key = f"videos/{job.get('id') or uuid4()}.mp4"
+        _progress(job, "upload_start")
+        video_url = _upload(output, key)
+        _progress(job, "complete", seconds=round(time.monotonic() - started, 3))
         return {
-            "video_url": _upload(output, key),
+            "video_url": video_url,
             "seed": seed,
             "model_id": os.getenv(
-                "WAN_MODEL_ID", "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+                "WAN_MODEL_ID", "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"
             ),
             "model_version": os.getenv(
-                "WAN_MODEL_VERSION", "5be7df9619b54f4e2667b2755bc6a756675b5cd7"
+                "WAN_MODEL_VERSION", "2c5a06469cd2255816eb2e46b8e11600ed435d52"
             ),
             "workflow_version": os.getenv(
-                "WAN_WORKFLOW_VERSION", "wan22-t2v-adult-lora-audio-v3"
+                "WAN_WORKFLOW_VERSION", "wan22-t2v-fp8-adult-lora-audio-v4"
             ),
             "adult_adapter_id": os.getenv(
                 "WAN_ADULT_ADAPTER_ID", "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
@@ -321,7 +347,13 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             ),
             "adult_adapter_strength": ADAPTER_STRENGTH,
             "gpu_name": torch.cuda.get_device_name(),
+            "engine": "sglang",
+            "engine_version": "0.5.16",
+            "quantization": "nvidia-modelopt-fp8",
             "inference_seconds": inference_seconds,
+            "video_inference_seconds": video_seconds,
+            "audio_inference_seconds": audio_seconds,
+            "peak_memory_mb": generation.peak_memory_mb,
             "duration": duration,
             "fps": FPS,
             "frame_count": num_frames,
@@ -334,6 +366,6 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
 
 if os.getenv("EAGER_LOAD_MODELS", "1") == "1":
-    _pipeline()
+    _generator()
 
 runpod.serverless.start({"handler": handler})

@@ -1,5 +1,5 @@
-# check=skip=InvalidBaseImagePlatform
-ARG BASE_IMAGE=runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851
+# Blackwell/CUDA 13 image with native Wan 2.2 FP8 and dynamic LoRA support.
+ARG BASE_IMAGE=lmsysorg/sglang:v0.5.16@sha256:984699c298a95b73c469b2191403ddc85fd780506e13c39c4afff3845e27bc6c
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -12,18 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --break-system-packages --no-cache-dir \
-      "diffusers==0.40.0" \
-      "transformers==5.16.1" \
-      "accelerate==1.14.0" \
-      "peft==0.20.0" \
-      "safetensors==0.8.0" \
-      "huggingface-hub==1.29.0" \
       "imageio-ffmpeg==0.6.0" \
       "scipy==1.17.0" \
-      "ftfy>=6.3,<7" \
       "boto3>=1.40,<2" \
       "httpx>=0.28,<1" \
-    && pip install --break-system-packages --no-cache-dir --ignore-installed cryptography \
       "runpod>=1.8,<2"
 
 # Diffusers needs the imageio Python frontend in addition to imageio-ffmpeg.

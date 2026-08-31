@@ -1,11 +1,11 @@
 # 自建视频链路 V2：质量优先方案
 
-更新时间：2026-08-27（America/Los_Angeles）
+更新时间：2026-08-30（America/Los_Angeles）
 
-生产更新（2026-08-28）：V2 已升级为 4–15 秒、六种画幅、480p/720p，并使用 AudioLDM2
-生成环境声/音效。真实验收在 H100 80GB 上完成：15 秒、241 帧、16fps、640×480（4:3）、
-AAC 音轨，执行约 1475 秒。96GB Pro 在本轮无可用 Serverless Worker，因此 V1 保持
-96GB Pro，V2 当前使用 H100；两者不再宣称完全相同硬件。
+速度修订（2026-08-30）：旧版约 126GB BF16 + CPU offload 在 H100 上曾有一个 15 秒 720p
+任务跑满两小时后失败，单任务约花 `$9.97`，因此不再作为生产方案。V2 改为 NVIDIA 官方
+约 45GB ModelOpt FP8 权重 + SGLang 动态双 LoRA；V1/V2 下一轮统一在 RTX PRO 6000
+Blackwell MIG 48GB 上验证，历史 Serverless 实付约 `$1.752/小时`，硬上限 `$3/小时`。
 
 ## 结论
 
@@ -16,7 +16,7 @@ Worker 镜像、RunPod Serverless Endpoint、Network Volume、模型配置和成
 首轮验证顺序：
 
 1. 先用现有 V1 做 8/12/20 steps 的固定种子参数 A/B，不创建任何新基础设施。
-2. V2 使用官方 `Wan-AI/Wan2.2-T2V-A14B-Diffusers`，支持 4–15 秒，先验证 480p，再验证 720p。
+2. V2 使用官方 `nvidia/Wan2.2-T2V-A14B-Diffusers-FP8`，支持 4–15 秒，先验证 480p，再验证 720p。
 3. 成人 LoRA 是 V2 必选组件：高噪声与低噪声权重分别装入两个专家，不能由任务关闭。
 4. 用户对 V1/V2 成片投赞成或反对票，以真实投票数据决定后续默认模型。
 
@@ -106,29 +106,25 @@ Wan 2.2 A14B 是高/低噪声双专家 MoE，总参数约 27B、每步激活约 
 
 通过 Hugging Face API 按仓库文件大小汇总：
 
-- Wan 2.2 T2V-A14B Diffusers：约 126.20GB。
+- NVIDIA Wan 2.2 T2V-A14B ModelOpt FP8：约 45.02GB。
 - 强制成人高/低噪声 LoRA：约 1.23GB。
+- AudioLDM2 safetensors：约 4.48GB。
 
-因此 V2 首轮模型卷至少 150GB。I2V 不在首轮落盘，避免额外约 126GB 常驻存储。
+因此 V2 新卷使用 70GB，给约 50.73GB 模型及 Hub 元数据保留空间。旧 150GB BF16 卷在
+FP8 实机验收完成前保留，验收后再由所有者确认删除。
 
-2026-08-27 的只读 RunPod 库存核验：
+2026-08-30 的只读 RunPod 库存与历史账单核验：
 
-- RTX PRO 6000 Blackwell 96GB：Secure 约 $2.09/h，多区域 Low。
-- 同卡在 **Serverless Endpoint** 编辑页的当前执行价是 $3.49/h；这和 Pod/Secure 报价不是同一计费档。
+- RTX PRO 6000 Blackwell MIG 48GB：Secure Pod 标价约 `$1.09/h`，US-NE-1 库存 Low。
+- 同卡历史 **Serverless** 实付约 `$1.752/h`；Serverless 与 Pod 标价不是同一计费档。
 
-V1 和 V2 都固定为完整的 96GB RTX PRO 6000 Blackwell，不使用 48GB MIG 切片，也不配置
-A100/H100/L40S 回退。2026-08-27 所有者确认可在 A100、H100 与 RTX PRO 6000 中按性价比选择；
-最终固定 RTX PRO 6000，因为它提供 96GB 显存、Secure Pod 库存为 Medium，且当前 Serverless
-$3.49/h 低于 80GB PRO 档的 $4.79/h。Secure Pod 上限仍为 $2.50/h，Serverless 上限提高到
-$3.50/h。实际创建卷或修改 Endpoint 前必须重新读取目标数据中心的逐区域库存和价格，因为
-Network Volume 会把 Endpoint 约束到对应区域。
+V1 和 V2 都固定为同一个 MIG 48GB 精确 GPU ID，不配置 A100/H100/L40S 回退；这使投票比较
+不会混入硬件差异。实际创建卷或修改 Endpoint 前必须重新读取目标数据中心的逐区域库存和
+Serverless 价格，任何实际执行价超过 `$3/h` 都停止。Network Volume 会把 Endpoint 约束到
+对应区域。
 
-V1 当前仍是 48GB MIG，尚未保存改动；V2 Endpoint 也尚未创建。付费边界仍然有效：创建 V2 卷、
-Endpoint，或让任一 Endpoint 的 worker 数量大于零之前，必须停下由所有者操作或再次确认。
-
-未选 A100 的原因是当前 PCIe 无库存、SXM 仅 Low，且 80GB 对双专家和双 LoRA 的余量更小。
-未选 H100 的原因是当前 Serverless 80GB PRO 档约 $4.79/h；它更快，但首轮质量 A/B 的单位成本
-更高。
+付费边界：代码、镜像和模型锁先完成；测试 Endpoint 空闲 `workersMin=0`。只在实测窗口把
+`workersMax` 设为 1，并用 30 分钟 execution timeout 限制首轮损失，任务终态立即缩回 0。
 
 ## 固定 A/B 验收
 
@@ -178,6 +174,7 @@ timeout 30 分钟。质量通过后再讨论第二区域冗余；两个 Network 
 
 - Wan 2.2 官方 T2V 模型卡：https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B
 - Wan 2.2 官方 Diffusers T2V：https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B-Diffusers
+- NVIDIA Wan 2.2 ModelOpt FP8：https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-FP8
 - Wan 2.2 官方代码：https://github.com/Wan-Video/Wan2.2
 - PinkCherry LTX 2.3 v1.8：https://huggingface.co/SexGod1979/PinkCherry_NSFW_LTX23
 - 候选 Wan 成人 LoRA：https://huggingface.co/lopi999/Wan2.2-I2V_General-NSFW-LoRA

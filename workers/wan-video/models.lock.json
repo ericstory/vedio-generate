@@ -1,14 +1,14 @@
 {
-  "layout_version": 1,
-  "expected_download_bytes": 131908621076,
+  "layout_version": 2,
+  "expected_download_bytes": 50729536992,
   "artifacts": [
     {
-      "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-      "revision": "5be7df9619b54f4e2667b2755bc6a756675b5cd7",
+      "repo": "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8",
+      "revision": "2c5a06469cd2255816eb2e46b8e11600ed435d52",
       "path": "*",
-      "size": 126200628126,
+      "size": 45021544042,
       "sha256": null,
-      "note": "Repository revision is pinned; Hugging Face verifies individual Hub/Xet objects."
+      "note": "NVIDIA ModelOpt FP8 repository revision is pinned; Hugging Face verifies individual Hub/Xet objects."
     },
     {
       "repo": "lopi999/Wan2.2-I2V_General-NSFW-LoRA",

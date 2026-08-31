@@ -13,9 +13,9 @@ def wan_settings() -> RunPodSettings:
     return RunPodSettings(
         api_key="secret",
         endpoint_id="wan-endpoint",
-        model_id="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        model_id="nvidia/Wan2.2-T2V-A14B-Diffusers-FP8",
         model_version="wan-revision",
-        workflow_version="wan22-t2v-adult-lora-v2",
+        workflow_version="wan22-t2v-fp8-adult-lora-audio-v4",
         ui_model_id="wan-2.2-a14b-adult-v2",
         adult_adapter_id="lopi999/Wan2.2-I2V_General-NSFW-LoRA",
         adult_adapter_version="adapter-revision",
@@ -74,7 +74,14 @@ def test_runpod_client_reads_persisted_video_url() -> None:
             json={
                 "id": "rp-1",
                 "status": "COMPLETED",
-                "output": {"video_url": "https://media.example/video.mp4"},
+                "output": {
+                    "video_url": "https://media.example/video.mp4",
+                    "engine": "sglang",
+                    "quantization": "nvidia-modelopt-fp8",
+                    "video_inference_seconds": 480.5,
+                    "audio_inference_seconds": 22.0,
+                    "peak_memory_mb": 43100.0,
+                },
             },
         )
 
@@ -87,6 +94,11 @@ def test_runpod_client_reads_persisted_video_url() -> None:
     result = client.get_task("rp-1")
     assert result["status"] == "succeeded"
     assert result["content"]["video_url"] == "https://media.example/video.mp4"
+    assert result["content"]["engine"] == "sglang"
+    assert result["content"]["quantization"] == "nvidia-modelopt-fp8"
+    assert result["content"]["video_inference_seconds"] == 480.5
+    assert result["content"]["audio_inference_seconds"] == 22.0
+    assert result["content"]["peak_memory_mb"] == 43100.0
     client.close()
 
 

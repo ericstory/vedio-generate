@@ -1,18 +1,18 @@
 {
-  "policy_version": 2,
+  "policy_version": 3,
   "comparison_group": "v1-v2-same-hardware",
-  "minimum_vram_gb": 96,
-  "maximum_secure_price_usd_per_hour": 2.5,
-  "maximum_serverless_price_usd_per_hour": 3.5,
+  "minimum_vram_gb": 48,
+  "maximum_secure_price_usd_per_hour": 3.0,
+  "maximum_serverless_price_usd_per_hour": 3.0,
   "allow_fallback_gpu_types": false,
-  "pricing_note": "Selected for V1/V2 parity: Secure Pod $2.09/h and Serverless $3.49/h observed on 2026-08-27; recheck before provisioning.",
-  "observed_serverless_price_usd_per_hour": 3.49,
+  "pricing_note": "Selected for V1/V2 parity: Secure Pod $1.09/h and Serverless $1.752/h observed on 2026-08-30; recheck before provisioning.",
+  "observed_serverless_price_usd_per_hour": 1.752,
   "serverless_provisioning_blocked": false,
   "gpu_types": [
     {
-      "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
-      "vram_gb": 96,
-      "secure_price_usd_per_hour": 2.09,
+      "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
+      "vram_gb": 48,
+      "secure_price_usd_per_hour": 1.09,
       "quantization": "fp8-cast"
     }
   ]

@@ -34,17 +34,17 @@ checkpoint 的兼容性风险低。Ada/Hopper/Blackwell 自动使用 `fp8-cast`�
 卡自动保留 BF16，因此同一 Serverless Endpoint 可以配置多 GPU 回退。如显存不足再启用
 `LTX_OFFLOAD=cpu`，但会明显降低速度。
 
-48GB MIG 首轮实测需要 `LTX_OFFLOAD=cpu`，并建议使用
+48GB MIG 实测需要 `LTX_OFFLOAD=cpu`，并建议使用
 `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512`；完整 96GB 卡和 A100 80GB 可继续使用
 `LTX_OFFLOAD=none`。Serverless handler 必须像官方 CLI 一样在 `torch.inference_mode()` 下
 调用 pipeline，否则 CPU offload 加载出的 inference tensors 会在默认 autograd 路径报错。
 
 ## GPU 选择范围
 
-为保证 V1/V2 用户投票处于相同硬件条件，选卡策略固定在 `gpu_policy.json`：只允许完整的
-`NVIDIA RTX PRO 6000 Blackwell Server Edition` 96GB，不允许 MIG 48GB 或其他型号回退，
-Secure Pod 价格上限 `$2.50/小时`，Serverless 价格上限 `$3.50/小时`。创建或修改 Endpoint 前必须重新检查实时价格与目标
-Volume 数据中心库存。
+为保证 V1/V2 用户投票处于相同硬件条件，选卡策略固定在 `gpu_policy.json`：两条链路只允许
+`NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb`，不配置其他型号回退。
+Secure Pod 与 Serverless 的硬上限都是 `$3/小时`；2026-08-30 的历史 Serverless 实付约
+`$1.752/小时`。创建或修改 Endpoint 前必须重新检查实时价格与目标 Volume 数据中心库存。
 
 ## 许可证与内容边界
 

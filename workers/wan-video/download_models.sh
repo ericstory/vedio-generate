@@ -2,17 +2,17 @@
 set -euo pipefail
 
 if [[ -d /runpod-volume ]]; then
-  DEFAULT_ROOT=/runpod-volume/models/Wan2.2-T2V-A14B-Adult-v2
+  DEFAULT_ROOT=/runpod-volume/models/Wan2.2-T2V-A14B-Adult-FP8-v4
 else
-  DEFAULT_ROOT=/workspace/models/Wan2.2-T2V-A14B-Adult-v2
+  DEFAULT_ROOT=/workspace/models/Wan2.2-T2V-A14B-Adult-FP8-v4
 fi
 
 MODEL_ROOT="${MODEL_ROOT:-$DEFAULT_ROOT}"
 DOWNLOAD_MAX_WORKERS="${DOWNLOAD_MAX_WORKERS:-8}"
 mkdir -p "$MODEL_ROOT/base" "$MODEL_ROOT/adult-lora" "$MODEL_ROOT/audio/audioldm2"
 
-hf download Wan-AI/Wan2.2-T2V-A14B-Diffusers \
-  --revision 5be7df9619b54f4e2667b2755bc6a756675b5cd7 \
+hf download nvidia/Wan2.2-T2V-A14B-Diffusers-FP8 \
+  --revision 2c5a06469cd2255816eb2e46b8e11600ed435d52 \
   --local-dir "$MODEL_ROOT/base" \
   --max-workers "$DOWNLOAD_MAX_WORKERS"
 

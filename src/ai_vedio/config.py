@@ -117,14 +117,12 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
         management_api_base_url=os.getenv(
             "RUNPOD_MANAGEMENT_API_BASE_URL", "https://rest.runpod.io/v1"
         ).rstrip("/"),
-        model_id=os.getenv(
-            "WAN_MODEL_ID", "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
-        ),
+        model_id=os.getenv("WAN_MODEL_ID", "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"),
         model_version=os.getenv(
-            "WAN_MODEL_VERSION", "5be7df9619b54f4e2667b2755bc6a756675b5cd7"
+            "WAN_MODEL_VERSION", "2c5a06469cd2255816eb2e46b8e11600ed435d52"
         ),
         workflow_version=os.getenv(
-            "WAN_WORKFLOW_VERSION", "wan22-t2v-adult-lora-audio-v3"
+            "WAN_WORKFLOW_VERSION", "wan22-t2v-fp8-adult-lora-audio-v4"
         ),
         ui_model_id="wan-2.2-a14b-adult-v2",
         adult_adapter_id=os.getenv(

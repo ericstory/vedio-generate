@@ -49,14 +49,15 @@ def test_quantization_adapts_to_gpu_generation() -> None:
 
 def test_gpu_policy_stays_inside_cost_and_vram_limits() -> None:
     policy = json.loads((WORKER_ROOT / "gpu_policy.json").read_text(encoding="utf-8"))
-    assert policy["minimum_vram_gb"] == 96
-    assert policy["maximum_secure_price_usd_per_hour"] == 2.5
+    assert policy["minimum_vram_gb"] == 48
+    assert policy["maximum_secure_price_usd_per_hour"] == 3.0
+    assert policy["maximum_serverless_price_usd_per_hour"] == 3.0
     assert policy["allow_fallback_gpu_types"] is False
     assert [gpu["id"] for gpu in policy["gpu_types"]] == [
-        "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb"
     ]
-    assert all(gpu["vram_gb"] == 96 for gpu in policy["gpu_types"])
-    assert all(gpu["secure_price_usd_per_hour"] <= 2.5 for gpu in policy["gpu_types"])
+    assert all(gpu["vram_gb"] == 48 for gpu in policy["gpu_types"])
+    assert all(gpu["secure_price_usd_per_hour"] <= 3.0 for gpu in policy["gpu_types"])
 
 
 def test_private_adult_research_prompt_is_allowed() -> None:

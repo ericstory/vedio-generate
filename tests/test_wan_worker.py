@@ -49,18 +49,17 @@ def test_wan_prompt_policy_rejects_disallowed_combinations() -> None:
 
 def test_wan_handler_forces_both_denoiser_adapters() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
-    assert 'adapter_name="adult_high"' in source
-    assert 'adapter_name="adult_low"' in source
-    assert "load_into_transformer_2=True" in source
-    assert "pipe.transformer.set_adapters" in source
-    assert "pipe.transformer_2.set_adapters" in source
-    assert "enable_model_cpu_offload" in source
+    assert "DiffGenerator.from_pretrained" in source
+    assert '["adult_high", "adult_low"]' in source
+    assert 'target=["transformer", "transformer_2"]' in source
+    assert 'merge_mode="dynamic"' in source
+    assert "dit_cpu_offload=False" in source
+    assert "text_encoder_cpu_offload=True" in source
 
 
 def test_wan_image_installs_complete_video_export_backend() -> None:
     dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert '"transformers==5.16.1"' in dockerfile
-    assert '"huggingface-hub==1.29.0"' in dockerfile
+    assert "lmsysorg/sglang:v0.5.16@sha256:" in dockerfile
     assert '"imageio-ffmpeg==0.6.0"' in dockerfile
     assert '"imageio==2.37.0"' in dockerfile
     assert '"scipy==1.17.0"' in dockerfile
@@ -77,17 +76,30 @@ def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
     assert '"has_audio": generate_audio' in source
 
 
-def test_v1_and_v2_use_the_same_full_96gb_gpu_policy() -> None:
+def test_v1_and_v2_use_the_same_mig48_gpu_policy_under_three_dollars() -> None:
     root = Path(__file__).parents[1] / "workers"
     ltx = json.loads((root / "ltx-video" / "gpu_policy.json").read_text())
     wan = json.loads((root / "wan-video" / "gpu_policy.json").read_text())
     for policy in (ltx, wan):
-        assert policy["minimum_vram_gb"] == 96
-        assert policy["maximum_secure_price_usd_per_hour"] == 2.5
-        assert policy["maximum_serverless_price_usd_per_hour"] == 3.5
-        assert policy["observed_serverless_price_usd_per_hour"] <= 3.5
+        assert policy["minimum_vram_gb"] == 48
+        assert policy["maximum_secure_price_usd_per_hour"] == 3.0
+        assert policy["maximum_serverless_price_usd_per_hour"] == 3.0
+        assert policy["observed_serverless_price_usd_per_hour"] <= 3.0
         assert policy["serverless_provisioning_blocked"] is False
         assert policy["allow_fallback_gpu_types"] is False
         assert [gpu["id"] for gpu in policy["gpu_types"]] == [
-            "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb"
         ]
+
+
+def test_wan_fp8_model_is_pinned_and_stage_timings_are_reported() -> None:
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    script = (WORKER_ROOT / "download_models.sh").read_text(encoding="utf-8")
+    lock = json.loads((WORKER_ROOT / "models.lock.json").read_text())
+    assert "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8" in source
+    assert "2c5a06469cd2255816eb2e46b8e11600ed435d52" in script
+    assert lock["expected_download_bytes"] < 60_000_000_000
+    assert '"video_inference_seconds": video_seconds' in source
+    assert '"audio_inference_seconds": audio_seconds' in source
+    assert '_progress(job, "video_start"' in source
+    assert '_progress(job, "complete"' in source
