@@ -23,6 +23,11 @@ RUN pip install --break-system-packages --no-cache-dir \
 # A separate layer lets this small fix reuse the large CUDA/dependency layer.
 RUN pip install --break-system-packages --no-cache-dir "imageio==2.37.0"
 
+# AudioLDM2's enable_model_cpu_offload() hard-requires accelerate, which the
+# SGLang base image does not ship; without it the audio stage fails after a
+# fully billed video inference.
+RUN pip install --break-system-packages --no-cache-dir "accelerate>=1.6,<2"
+
 WORKDIR /app
 COPY handler.py worker_config.py smoke.py download_models.sh /app/
 RUN chmod 0755 /app/download_models.sh

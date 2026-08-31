@@ -67,6 +67,11 @@ def test_wan_image_installs_complete_video_export_backend() -> None:
     assert '"scipy==1.17.0"' in dockerfile
 
 
+def test_wan_image_installs_accelerate_for_audio_cpu_offload() -> None:
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert '"accelerate>=1.6,<2"' in dockerfile
+
+
 def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert "AudioLDM2Pipeline" in source
