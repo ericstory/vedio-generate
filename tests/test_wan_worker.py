@@ -75,8 +75,8 @@ def test_wan_image_installs_accelerate_for_audio_cpu_offload() -> None:
 def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert "AudioLDM2Pipeline" in source
-    assert "_update_audio_model_kwargs" in source
-    assert "MethodType" in source
+    assert "_generate_audio_hidden_states" in source
+    assert "pipe.generate_language_model = MethodType" in source
     assert '"cvssp/audioldm2"' in source
     assert '"-c:a",' in source
     assert '"aac",' in source

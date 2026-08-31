@@ -52,42 +52,42 @@ def _progress(job: dict[str, Any], stage: str, **details: Any) -> None:
         progress_update(job, payload)
 
 
-def _update_audio_model_kwargs(
-    model: Any,
-    outputs: Any,
-    model_kwargs: dict[str, Any],
-) -> dict[str, Any]:
-    """Compatibility bridge for AudioLDM2 on transformers 5.x.
+def _generate_audio_hidden_states(
+    pipe: AudioLDM2Pipeline,
+    inputs_embeds: torch.Tensor = None,
+    max_new_tokens: int | None = None,
+    **model_kwargs: Any,
+) -> torch.Tensor:
+    """Compatibility replacement for AudioLDM2Pipeline.generate_language_model.
 
-    Diffusers 0.40 still calls this former GenerationMixin helper directly on
-    GPT2Model. Transformers 5 keeps the cache inputs but no longer exposes the
-    helper on that model class.
+    Diffusers 0.40 still drives the GPT2 hidden-state rollout through private
+    GenerationMixin helpers (`_get_initial_cache_position`,
+    `_update_model_kwargs_for_generation`) that transformers 5 no longer
+    exposes on bare GPT2Model. The rollout is only eight steps over a short
+    projection sequence, so uncached full-sequence forward passes reproduce
+    the stock semantics through the public model API alone.
     """
-    for cache_name in ("past_key_values", "mems", "past_buckets_states"):
-        cache = getattr(outputs, cache_name, None)
-        if cache is not None:
-            model_kwargs["past_key_values" if cache_name != "past_key_values" else cache_name] = cache
-            break
-    if "token_type_ids" in model_kwargs:
-        token_type_ids = model_kwargs["token_type_ids"]
-        model_kwargs["token_type_ids"] = torch.cat(
-            [token_type_ids, token_type_ids[:, -1:].clone()], dim=-1
+    if max_new_tokens is None:
+        max_new_tokens = int(pipe.language_model.config.max_new_tokens)
+    attention_mask = model_kwargs.get("attention_mask")
+    for _ in range(int(max_new_tokens)):
+        forward_kwargs: dict[str, Any] = {
+            "inputs_embeds": inputs_embeds,
+            "use_cache": False,
+            "return_dict": True,
+        }
+        if attention_mask is not None:
+            forward_kwargs["attention_mask"] = attention_mask
+        output = pipe.language_model(**forward_kwargs)
+        inputs_embeds = torch.cat(
+            [inputs_embeds, output.last_hidden_state[:, -1:, :]], dim=1
         )
-    if "attention_mask" in model_kwargs:
-        attention_mask = model_kwargs["attention_mask"]
-        model_kwargs["attention_mask"] = torch.cat(
-            [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
-            dim=-1,
-        )
-    cache_position = model_kwargs.get("cache_position")
-    if cache_position is not None:
-        if model_kwargs.get("use_cache", True):
-            model_kwargs["cache_position"] = cache_position[-1:] + 1
-        else:
-            model_kwargs["cache_position"] = torch.cat(
-                [cache_position, cache_position[-1:] + 1]
+        if attention_mask is not None:
+            attention_mask = torch.cat(
+                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
+                dim=-1,
             )
-    return model_kwargs
+    return inputs_embeds[:, -int(max_new_tokens):, :]
 
 
 def _require_models() -> None:
@@ -144,11 +144,7 @@ def _audio_pipeline() -> AudioLDM2Pipeline:
             torch_dtype=torch.float16,
             local_files_only=True,
         )
-        if not hasattr(pipe.language_model, "_update_model_kwargs_for_generation"):
-            pipe.language_model._update_model_kwargs_for_generation = MethodType(
-                _update_audio_model_kwargs,
-                pipe.language_model,
-            )
+        pipe.generate_language_model = MethodType(_generate_audio_hidden_states, pipe)
         pipe.enable_model_cpu_offload()
         _AUDIO_PIPELINE = pipe
     return _AUDIO_PIPELINE
