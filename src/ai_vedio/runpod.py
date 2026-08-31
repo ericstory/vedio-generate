@@ -292,7 +292,7 @@ class RunPodPodClient:
                 "gpu": {
                     "id": self.settings.gpu_id,
                     "count": 1,
-                    "allowedCudaVersions": ["13.0"],
+                    "minCudaVersion": "13.0",
                 },
                 "disk": 20,
                 "env": pod_env,
