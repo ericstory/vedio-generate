@@ -1,77 +1,41 @@
-# RunPod 双链路交接记录（2026-08-30）
+# RunPod 双链路交接记录（2026-08-31 更新）
 
-## 当前目标
+## 状态：同 GPU 对照测试已完成
 
-在相同硬件条件下对齐并比较两条独立视频链路：
+V1（PinkCherry LTX 2.3）与 V2（Wan 2.2 A14B FP8 + 成人 LoRA + AudioLDM2）已在同一
+`NVIDIA RTX PRO 6000 Blackwell Server Edition`（96GB，US-KS-2，Secure `$2.09/h`）、
+同提示词/参数/seed 下各自完成端到端运行，指标与视频对照见
+[`ab-wan-ltx-rtx-pro-6000.md`](ab-wan-ltx-rtx-pro-6000.md)。终态 Pod 数为 0。
 
-- V1：PinkCherry LTX 2.3 v1.8
-- V2：Wan 2.2 A14B FP8 + 必选成人 LoRA + AudioLDM2
-- 两条链路统一使用 `NVIDIA RTX PRO 6000 Blackwell Server Edition`（96GB）
-- GPU 单价硬上限 `$3.00/h`；当前 Secure Pod 目录价 `$2.09/h`
-- Pod 仅在任务到达时创建，任务结束或 30 分钟超时后删除
+## 本轮变更
 
-## 已完成
+- Railway 已部署 main（部署 `f134cc56`），CUDA floor 修复上线并被 NC2 真实建 Pod 验证。
+- Wan 镜像两个音频段缺陷已修复并推送：
+  - `d341704` — 镜像安装 accelerate（AudioLDM2 CPU offload 硬依赖）
+  - `ed4470f` — AudioLDM2 GPT2 rollout 重绑为公开 API 前向（transformers 5 兼容）
+- Wan 模板 `wjxhc0dtid` 镜像已指向
+  `ghcr.io/ericstory/papa-wan-video:ed4470f19c328e98a13066d0366935887fe589a9`。
+- 新增 RunPod registry 凭据 `cmtgxws1c003d14njrtc07zd2`（GHCR，`read:packages`
+  classic PAT，owner ericstory），已挂到 `km9g8f4guq` 与 `wjxhc0dtid` 两个模板。
+  背景：RunPod 共享出口 IP 的 GHCR 匿名拉取配额经常耗尽（`toomanyrequests`），
+  匿名拉取导致 LTX 5 次建 Pod 失败；认证拉取实测 2.5 分钟完成。PAT 过期后需轮换。
 
-- L40 48GB 实测在加载 Wan FP8 双专家和 UMT5 时 OOM，已排除。
-- RTX PRO 6000 已完成 Wan 4 秒、480p、16:9 实际推理验证：
-  - 40 步去噪约 `274.23s`
-  - 解码约 `7.87s`
-  - 含冷启动端到端约 `513.85s`
-  - 峰值显存约 `44.1GB`
-- Wan 与 LTX 已建立一次性 Pod 模板和镜像。
-- Wan 已从常驻 Serverless 改为按任务创建的精确 GPU Pod，并有价格、GPU 型号、超时、回调后删除四层保护。
-- Wan 已支持按顺序尝试多个“数据中心 + 对应网络卷”，当前顺序为 KS2 → NE1 → NC2。
-- RunPod 控制面已从 REST v1 迁移到 REST v2；Serverless 作业 API 保持不变。
-- 提供 `RUNPOD_API_V1=1` 紧急回滚分支，但 v1 不支持 US-NC-2。
-- 测试结果：`52 passed`；迁移扫描器结果为 `Nothing to migrate`（仅保留显式回滚分支）。
-- `VIDEO_UPLOAD_TOKEN` 已轮换并同步 Railway/RunPod 模板；不要在日志中输出变量值。
+## 资源/费用
 
-## US-NC-2 模型卷
+- 运行中 Pod：`0`；仅网络卷存储费（KS2/NE1/NC2 共 7 卷，约 $11.90/月 新增部分见旧记录）
+- 账户 8 月 GPU 累计约 `$4.96`（本轮对照 + 缺陷修复重跑约 `$3.2`）
 
-- Wan：`nv7g5aobqn`，70GB，`papa-wan22-fp8-models-nc2`
-- LTX：`mmw8n3z0t2`，100GB，`pinkcherry-ltx23-models-nc2`
-- Wan 的 FP8 主模型、双 LoRA、AudioLDM2 已下载完成。
-- LTX 实际占用约 74GB；PinkCherry、distilled LoRA、spatial upscaler 三个关键文件 SHA256 均通过校验，Gemma 五个分片已下载。
-- 新增存储成本约 `$11.90/月`。
+## 模板/镜像
 
-## 当前资源/费用状态
+- Wan 模板：`wjxhc0dtid` → 镜像 `ed4470f19c328e98a13066d0366935887fe589a9`
+- LTX 模板：`km9g8f4guq` → 镜像 `87901bc5d36164d54f211b94efdc2f3165b8a2b8`
+- 两模板 registry 凭据：`cmtgxws1c003d14njrtc07zd2`
 
-- 当前运行中 RunPod Pod：`0`
-- 当前没有 GPU 小时费，仅网络卷存储费。
-- 两个 NC2 下载 Pod 已在验证完成后删除。
-- RTX PRO 6000 v2 目录最近一次查询：全局 HIGH、US-NC-2 MEDIUM、Secure `$2.09/h`。
+## 下一步建议
 
-## 最新根因与代码状态
+1. 用户人工验收两个视频（`/generate` 任务列表即可播放/下载；LTX one-shot 的视频不在
+   任务 DB，仅在卷上：`d5ce95fd-c283-41ee-a7eb-248ccdabeeef.mp4`）。
+2. 启动 `video-pipeline-v2.md` 的固定 A/B 矩阵（6–10 提示词 × 3 seed，人工盲评）。
+3. 可选改进：Wan handler 拆分模型加载与纯推理计时；LTX one-shot 增加回调以纳入任务 DB。
 
-第一次 NC2 提交失败有两个连续原因：
-
-1. REST v1 的数据中心枚举不认识 `US-NC-2`，已迁移 REST v2 修复。
-2. v2 将 `allowedCudaVersions=["13.0"]` 解释为精确匹配，而 NC2 当前机器上报 CUDA 13.2；已改为 `minCudaVersion="13.0"`。
-
-CUDA 修复已推送到 `main`：
-
-- `5c09d0b` — Use CUDA floor for RunPod v2 pods
-- `1675a4c` — Test RunPod CUDA floor placement
-
-注意：当前 Railway 最近成功部署 `15b34743-4494-4664-8a32-8230dc9861de` 早于上述两个 CUDA 修复提交；下个会话首先触发/确认部署最新 `1675a4c`。
-
-## 下个会话的执行顺序
-
-1. 触发 Railway 部署最新 `main`，确认健康检查成功，且生产变量为：
-   - `RUNPOD_MANAGEMENT_API_BASE_URL=https://api.runpod.io/v2`
-   - `RUNPOD_API_V1=0`
-   - NC2 additional region volume 指向 `nv7g5aobqn`
-2. 通过生产登录 API 提交 Wan 4 秒、480p、16:9、安全测试提示词。
-3. 确认创建的是 NC2 的精确 RTX PRO 6000，价格 `$2.09/h`，任务成功回调后 Pod 自动删除。
-4. 使用 LTX one-shot 模板和 NC2 卷 `mmw8n3z0t2`，在同一 RTX PRO 6000 上跑相同提示词、时长、尺寸和种子。
-5. 记录两条链路的冷启动、模型加载、视频推理、音频推理、峰值显存、总耗时和实际成本。
-6. 确认最终 RunPod Pod 列表为空，再把可比结果写入实验记录/UI 元数据。
-
-## 已知模板/镜像
-
-- Wan 模板：`wjxhc0dtid`
-- Wan 镜像：`ghcr.io/ericstory/papa-wan-video:2d53dce230f68d475826b83c4924553c4ef67370`
-- LTX 模板：`km9g8f4guq`
-- LTX 镜像：`ghcr.io/ericstory/papa-ltx-video:87901bc5d36164d54f211b94efdc2f3165b8a2b8`
-
-不要把 RunPod API key、Hugging Face token、Railway 管理员密码或上传 token 写入本文件或命令输出。
+不要把 RunPod API key、GitHub PAT、Railway 管理员密码或上传 token 写入本文件或命令输出。
