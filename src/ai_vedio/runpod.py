@@ -286,6 +286,9 @@ class RunPodPodClient:
                     self.settings.fallback_network_volume_id,
                 )
             )
+        for lane in self.settings.additional_region_volumes:
+            if lane not in lanes:
+                lanes.append(lane)
         pod: dict[str, Any] | None = None
         selected_data_center = ""
         last_capacity_error: RunPodError | None = None

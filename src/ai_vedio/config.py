@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import os
 
 
@@ -75,6 +76,7 @@ class RunPodPodSettings:
     data_center_id: str = "US-KS-2"
     fallback_data_center_id: str = ""
     fallback_network_volume_id: str = ""
+    additional_region_volumes: tuple[tuple[str, str], ...] = ()
     volume_mount_path: str = "/runpod-volume"
     maximum_price_per_hour: float = 3.0
     maximum_runtime_seconds: int = 1800
@@ -162,6 +164,29 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
 def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
     """Load the price-capped, exact-GPU Wan Pod lane."""
     _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    additional_region_volumes: list[tuple[str, str]] = []
+    raw_region_volumes = os.getenv("RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES", "").strip()
+    if raw_region_volumes:
+        try:
+            decoded_region_volumes = json.loads(raw_region_volumes)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES must be valid JSON"
+            ) from exc
+        if not isinstance(decoded_region_volumes, list):
+            raise ValueError(
+                "RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES must be a JSON list"
+            )
+        for lane in decoded_region_volumes:
+            if not isinstance(lane, dict):
+                raise ValueError("Every additional Wan Pod lane must be a JSON object")
+            data_center_id = str(lane.get("data_center_id") or "").strip()
+            network_volume_id = str(lane.get("network_volume_id") or "").strip()
+            if not data_center_id or not network_volume_id:
+                raise ValueError(
+                    "Every additional Wan Pod lane requires data_center_id and network_volume_id"
+                )
+            additional_region_volumes.append((data_center_id, network_volume_id))
     return RunPodPodSettings(
         api_key=_required("RUNPOD_API_KEY"),
         template_id=_required("RUNPOD_WAN_POD_TEMPLATE_ID"),
@@ -182,6 +207,7 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
         fallback_network_volume_id=os.getenv(
             "RUNPOD_WAN_POD_FALLBACK_NETWORK_VOLUME_ID", ""
         ),
+        additional_region_volumes=tuple(additional_region_volumes),
         maximum_price_per_hour=float(
             os.getenv("RUNPOD_WAN_POD_MAX_PRICE_PER_HOUR", "3.0")
         ),

@@ -32,6 +32,7 @@ def wan_pod_settings() -> RunPodPodSettings:
         callback_token="callback-secret",
         fallback_data_center_id="US-NE-1",
         fallback_network_volume_id="fallback-volume",
+        additional_region_volumes=(("US-NC-2", "nc2-volume"),),
     )
 
 
@@ -297,7 +298,7 @@ def test_wan_pod_is_deleted_when_actual_price_exceeds_cap() -> None:
     client.close()
 
 
-def test_wan_pod_retries_only_the_pinned_fallback_volume_on_capacity_error() -> None:
+def test_wan_pod_retries_each_pinned_region_volume_on_capacity_error() -> None:
     posted = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -305,7 +306,7 @@ def test_wan_pod_retries_only_the_pinned_fallback_volume_on_capacity_error() -> 
             return httpx.Response(200, json={"env": {}})
         payload = __import__("json").loads(request.content)
         posted.append(payload)
-        if len(posted) == 1:
+        if len(posted) < 3:
             return httpx.Response(
                 500,
                 json={"error": "create pod: There are no instances currently available"},
@@ -331,9 +332,11 @@ def test_wan_pod_retries_only_the_pinned_fallback_volume_on_capacity_error() -> 
         task_id="local-task",
     )
     assert result["id"] == "fallback-pod"
-    assert result["content"]["pod_data_center_id"] == "US-NE-1"
+    assert result["content"]["pod_data_center_id"] == "US-NC-2"
     assert posted[0]["dataCenterIds"] == ["US-KS-2"]
     assert posted[0]["networkVolumeId"] == "volume"
     assert posted[1]["dataCenterIds"] == ["US-NE-1"]
     assert posted[1]["networkVolumeId"] == "fallback-volume"
+    assert posted[2]["dataCenterIds"] == ["US-NC-2"]
+    assert posted[2]["networkVolumeId"] == "nc2-volume"
     client.close()
