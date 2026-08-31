@@ -34,6 +34,20 @@ ADAPTER_LOW = Path(
     os.getenv("WAN_ADAPTER_LOW_PATH", str(ADAPTER_ROOT / "NSFW-22-L-e8.safetensors"))
 )
 ADAPTER_STRENGTH = float(os.getenv("WAN_ADULT_ADAPTER_STRENGTH", "0.9"))
+# Optional lightx2v distillation LoRA pair. When enabled it stacks on top of
+# the mandatory adult LoRAs (one pair per Wan 2.2 expert) and the template
+# drops to few-step CFG-free sampling for the fast profile.
+LIGHTNING_ENABLED = os.getenv("WAN_LIGHTNING_ENABLED", "0") == "1"
+LIGHTNING_ROOT = Path(
+    os.getenv("WAN_LIGHTNING_ROOT", str(MODEL_ROOT / "lightning-lora"))
+)
+LIGHTNING_HIGH = Path(
+    os.getenv("WAN_LIGHTNING_HIGH_PATH", str(LIGHTNING_ROOT / "high_noise_model.safetensors"))
+)
+LIGHTNING_LOW = Path(
+    os.getenv("WAN_LIGHTNING_LOW_PATH", str(LIGHTNING_ROOT / "low_noise_model.safetensors"))
+)
+LIGHTNING_STRENGTH = float(os.getenv("WAN_LIGHTNING_STRENGTH", "1.0"))
 AUDIO_MODEL_ROOT = Path(
     os.getenv("WAN_AUDIO_MODEL_ROOT", str(MODEL_ROOT / "audio" / "audioldm2"))
 )
@@ -105,11 +119,13 @@ def _generate_audio_hidden_states(
 
 
 def _require_models() -> None:
-    required = (BASE_MODEL_ROOT / "model_index.json", ADAPTER_HIGH, ADAPTER_LOW)
+    required = [BASE_MODEL_ROOT / "model_index.json", ADAPTER_HIGH, ADAPTER_LOW]
+    if LIGHTNING_ENABLED:
+        required += [LIGHTNING_HIGH, LIGHTNING_LOW]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(
-            "Wan V2 requires the base model and both mandatory adult LoRA weights: "
+            "Wan V2 requires the base model and all mandatory LoRA weights: "
             + ", ".join(missing)
         )
 
@@ -141,11 +157,20 @@ def _generator() -> DiffGenerator:
         )
         # Static FP8 weights cannot be destructively merged with LoRA. Dynamic
         # application preserves the quantized base and addresses both Wan 2.2 experts.
+        lora_names = ["adult_high", "adult_low"]
+        lora_paths = [str(ADAPTER_HIGH), str(ADAPTER_LOW)]
+        lora_targets = ["transformer", "transformer_2"]
+        lora_strengths = [ADAPTER_STRENGTH, ADAPTER_STRENGTH]
+        if LIGHTNING_ENABLED:
+            lora_names += ["lightning_high", "lightning_low"]
+            lora_paths += [str(LIGHTNING_HIGH), str(LIGHTNING_LOW)]
+            lora_targets += ["transformer", "transformer_2"]
+            lora_strengths += [LIGHTNING_STRENGTH, LIGHTNING_STRENGTH]
         generator.set_lora(
-            ["adult_high", "adult_low"],
-            [str(ADAPTER_HIGH), str(ADAPTER_LOW)],
-            target=["transformer", "transformer_2"],
-            strength=[ADAPTER_STRENGTH, ADAPTER_STRENGTH],
+            lora_names,
+            lora_paths,
+            target=lora_targets,
+            strength=lora_strengths,
             merge_mode="dynamic",
         )
         _GENERATOR = generator
@@ -303,24 +328,28 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         _progress(job, "model_load_done", seconds=model_load_seconds)
         _progress(job, "video_start", width=width, height=height, frames=num_frames)
         video_started = time.monotonic()
-        generation = generator.generate(
-            sampling_params_kwargs={
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "width": width,
-                "height": height,
-                "num_frames": num_frames,
-                "fps": FPS,
-                "num_inference_steps": int(os.getenv("WAN_INFERENCE_STEPS", "40")),
-                "guidance_scale": float(os.getenv("WAN_GUIDANCE_SCALE", "4.0")),
-                "guidance_scale_2": float(os.getenv("WAN_GUIDANCE_SCALE_2", "3.0")),
-                "seed": seed,
-                "save_output": True,
-                "return_file_paths_only": True,
-                "output_path": directory,
-                "output_file_name": video_only.name,
-            }
-        )
+        sampling_params_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "width": width,
+            "height": height,
+            "num_frames": num_frames,
+            "fps": FPS,
+            "num_inference_steps": int(os.getenv("WAN_INFERENCE_STEPS", "40")),
+            "guidance_scale": float(os.getenv("WAN_GUIDANCE_SCALE", "4.0")),
+            "guidance_scale_2": float(os.getenv("WAN_GUIDANCE_SCALE_2", "3.0")),
+            "seed": seed,
+            "save_output": True,
+            "return_file_paths_only": True,
+            "output_path": directory,
+            "output_file_name": video_only.name,
+        }
+        # Lightning distillation is trained against a shifted flow schedule;
+        # leave the pipeline default unless the profile sets it explicitly.
+        flow_shift = os.getenv("WAN_FLOW_SHIFT", "").strip()
+        if flow_shift:
+            sampling_params_kwargs["flow_shift"] = float(flow_shift)
+        generation = generator.generate(sampling_params_kwargs=sampling_params_kwargs)
         if generation is None or not generation.output_file_path:
             raise RuntimeError("SGLang returned no Wan video output")
         video_only = Path(generation.output_file_path)
@@ -391,6 +420,9 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "inference_steps": int(os.getenv("WAN_INFERENCE_STEPS", "40")),
             "guidance_scale": float(os.getenv("WAN_GUIDANCE_SCALE", "4.0")),
             "guidance_scale_2": float(os.getenv("WAN_GUIDANCE_SCALE_2", "3.0")),
+            "lightning_enabled": LIGHTNING_ENABLED,
+            "lightning_strength": LIGHTNING_STRENGTH if LIGHTNING_ENABLED else None,
+            "flow_shift": float(flow_shift) if flow_shift else None,
             "peak_memory_mb": generation.peak_memory_mb,
             "duration": duration,
             "fps": FPS,

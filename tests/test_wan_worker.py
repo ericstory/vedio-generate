@@ -121,6 +121,23 @@ def test_v1_and_v2_use_the_same_pro6000_pod_policy_under_three_dollars() -> None
         assert policy["gpu_types"][0]["secure_price_usd_per_hour"] < 3.0
 
 
+def test_wan_handler_supports_optional_lightning_fast_profile() -> None:
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert '"WAN_LIGHTNING_ENABLED"' in source
+    assert '"lightning_high", "lightning_low"' in source
+    assert '"WAN_FLOW_SHIFT"' in source
+    assert '"lightning_enabled": LIGHTNING_ENABLED' in source
+    lock = json.loads((WORKER_ROOT / "models.lock.json").read_text())
+    lightning = [
+        a for a in lock["artifacts"] if a["repo"] == "lightx2v/Wan2.2-Lightning"
+    ]
+    assert len(lightning) == 2
+    assert all(a["sha256"] and a["size"] > 1_000_000_000 for a in lightning)
+    assert all(
+        a["revision"] == "18bccf8884ec0a078eed79785eb4ef13ea16ce1e" for a in lightning
+    )
+
+
 def test_wan_fp8_model_is_pinned_and_stage_timings_are_reported() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     script = (WORKER_ROOT / "download_models.sh").read_text(encoding="utf-8")

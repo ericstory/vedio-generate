@@ -1,6 +1,6 @@
 {
   "layout_version": 2,
-  "expected_download_bytes": 50729536992,
+  "expected_download_bytes": 53183491840,
   "artifacts": [
     {
       "repo": "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8",
@@ -23,6 +23,22 @@
       "path": "NSFW-22-L-e8.safetensors",
       "size": 613516752,
       "sha256": "d6b783742f4d5fd63a0223ae1d5bf64fc995a6b408480ac2a00528ae0d4146db"
+    },
+    {
+      "repo": "lightx2v/Wan2.2-Lightning",
+      "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
+      "path": "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V2.0/high_noise_model.safetensors",
+      "size": 1226977424,
+      "sha256": "78cc2c9b44aca9ded8f69c6619639edca7459308051161253c3aa04ac6169a58",
+      "note": "Optional fast profile: 4-step distillation LoRA for the high-noise expert, stored as lightning-lora/high_noise_model.safetensors."
+    },
+    {
+      "repo": "lightx2v/Wan2.2-Lightning",
+      "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
+      "path": "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V2.0/low_noise_model.safetensors",
+      "size": 1226977424,
+      "sha256": "6bb498f926e71217106c3642e75273580c1de2dec0a6902cbae8e83d2402d5cf",
+      "note": "Optional fast profile: 4-step distillation LoRA for the low-noise expert, stored as lightning-lora/low_noise_model.safetensors."
     },
     {
       "repo": "cvssp/audioldm2",
