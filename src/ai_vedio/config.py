@@ -54,7 +54,8 @@ class RunPodSettings:
     api_key: str
     endpoint_id: str
     api_base_url: str = "https://api.runpod.ai/v2"
-    management_api_base_url: str = "https://rest.runpod.io/v1"
+    management_api_base_url: str = "https://api.runpod.io/v2"
+    use_management_api_v1: bool = False
     model_id: str = "SexGod1979/PinkCherry_NSFW_LTX23"
     model_version: str = "PinkCherry_FineTune_bf16_v1_8_LTX23"
     workflow_version: str = "pinkcherry-native-two-stage-v1"
@@ -71,7 +72,8 @@ class RunPodPodSettings:
     network_volume_id: str
     callback_url: str
     callback_token: str
-    api_base_url: str = "https://rest.runpod.io/v1"
+    api_base_url: str = "https://api.runpod.io/v2"
+    use_management_api_v1: bool = False
     gpu_id: str = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
     data_center_id: str = "US-KS-2"
     fallback_data_center_id: str = ""
@@ -114,13 +116,16 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
 
 def load_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
     _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    use_management_api_v1 = os.getenv("RUNPOD_API_V1", "0") == "1"
     return RunPodSettings(
         api_key=_required("RUNPOD_API_KEY"),
         endpoint_id=_required("RUNPOD_ENDPOINT_ID"),
         api_base_url=os.getenv("RUNPOD_API_BASE_URL", "https://api.runpod.ai/v2").rstrip("/"),
         management_api_base_url=os.getenv(
-            "RUNPOD_MANAGEMENT_API_BASE_URL", "https://rest.runpod.io/v1"
+            "RUNPOD_MANAGEMENT_API_BASE_URL",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",
         ).rstrip("/"),
+        use_management_api_v1=use_management_api_v1,
         model_id=os.getenv(
             "SELF_HOSTED_MODEL_ID", "SexGod1979/PinkCherry_NSFW_LTX23"
         ),
@@ -136,13 +141,16 @@ def load_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
 def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
     """Load the independent Wan V2 endpoint without changing the LTX V1 contract."""
     _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    use_management_api_v1 = os.getenv("RUNPOD_API_V1", "0") == "1"
     return RunPodSettings(
         api_key=_required("RUNPOD_API_KEY"),
         endpoint_id=_required("RUNPOD_WAN_ENDPOINT_ID"),
         api_base_url=os.getenv("RUNPOD_API_BASE_URL", "https://api.runpod.ai/v2").rstrip("/"),
         management_api_base_url=os.getenv(
-            "RUNPOD_MANAGEMENT_API_BASE_URL", "https://rest.runpod.io/v1"
+            "RUNPOD_MANAGEMENT_API_BASE_URL",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",
         ).rstrip("/"),
+        use_management_api_v1=use_management_api_v1,
         model_id=os.getenv("WAN_MODEL_ID", "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"),
         model_version=os.getenv(
             "WAN_MODEL_VERSION", "2c5a06469cd2255816eb2e46b8e11600ed435d52"
@@ -164,6 +172,7 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
 def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
     """Load the price-capped, exact-GPU Wan Pod lane."""
     _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    use_management_api_v1 = os.getenv("RUNPOD_API_V1", "0") == "1"
     additional_region_volumes: list[tuple[str, str]] = []
     raw_region_volumes = os.getenv("RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES", "").strip()
     if raw_region_volumes:
@@ -194,8 +203,10 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
         callback_url=_required("RUNPOD_WAN_POD_CALLBACK_URL"),
         callback_token=_required("VIDEO_UPLOAD_TOKEN"),
         api_base_url=os.getenv(
-            "RUNPOD_MANAGEMENT_API_BASE_URL", "https://rest.runpod.io/v1"
+            "RUNPOD_MANAGEMENT_API_BASE_URL",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",
         ).rstrip("/"),
+        use_management_api_v1=use_management_api_v1,
         gpu_id=os.getenv(
             "RUNPOD_WAN_POD_GPU_ID",
             "NVIDIA RTX PRO 6000 Blackwell Server Edition",
