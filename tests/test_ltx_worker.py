@@ -54,7 +54,7 @@ def test_gpu_policy_stays_inside_cost_and_vram_limits() -> None:
     assert policy["maximum_serverless_price_usd_per_hour"] == 3.0
     assert policy["allow_fallback_gpu_types"] is False
     assert [gpu["id"] for gpu in policy["gpu_types"]] == [
-        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb"
+        "NVIDIA L40"
     ]
     assert all(gpu["vram_gb"] == 48 for gpu in policy["gpu_types"])
     assert all(gpu["secure_price_usd_per_hour"] <= 3.0 for gpu in policy["gpu_types"])

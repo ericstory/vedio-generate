@@ -5,14 +5,14 @@
   "maximum_secure_price_usd_per_hour": 3.0,
   "maximum_serverless_price_usd_per_hour": 3.0,
   "allow_fallback_gpu_types": false,
-  "pricing_note": "Selected for V1/V2 parity: Secure Pod $1.09/h and Serverless $1.752/h observed on 2026-08-30; recheck before provisioning.",
-  "observed_serverless_price_usd_per_hour": 1.752,
+  "pricing_note": "Queue-based Serverless has no MIG48 pool. Exact L40 in US-KS-2 is selected for V1/V2 parity: Secure Pod $0.82/h and Serverless Flex $1.908/h observed on 2026-08-30; recheck before provisioning.",
+  "observed_serverless_price_usd_per_hour": 1.908,
   "serverless_provisioning_blocked": false,
   "gpu_types": [
     {
-      "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
+      "id": "NVIDIA L40",
       "vram_gb": 48,
-      "secure_price_usd_per_hour": 1.09,
+      "secure_price_usd_per_hour": 0.82,
       "quantization": "nvidia-modelopt-fp8"
     }
   ]

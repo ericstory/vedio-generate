@@ -76,7 +76,7 @@ def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
     assert '"has_audio": generate_audio' in source
 
 
-def test_v1_and_v2_use_the_same_mig48_gpu_policy_under_three_dollars() -> None:
+def test_v1_and_v2_use_the_same_l40_gpu_policy_under_three_dollars() -> None:
     root = Path(__file__).parents[1] / "workers"
     ltx = json.loads((root / "ltx-video" / "gpu_policy.json").read_text())
     wan = json.loads((root / "wan-video" / "gpu_policy.json").read_text())
@@ -88,7 +88,7 @@ def test_v1_and_v2_use_the_same_mig48_gpu_policy_under_three_dollars() -> None:
         assert policy["serverless_provisioning_blocked"] is False
         assert policy["allow_fallback_gpu_types"] is False
         assert [gpu["id"] for gpu in policy["gpu_types"]] == [
-            "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb"
+            "NVIDIA L40"
         ]
 
 

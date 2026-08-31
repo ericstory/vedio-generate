@@ -42,9 +42,10 @@ checkpoint 的兼容性风险低。Ada/Hopper/Blackwell 自动使用 `fp8-cast`�
 ## GPU 选择范围
 
 为保证 V1/V2 用户投票处于相同硬件条件，选卡策略固定在 `gpu_policy.json`：两条链路只允许
-`NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb`，不配置其他型号回退。
-Secure Pod 与 Serverless 的硬上限都是 `$3/小时`；2026-08-30 的历史 Serverless 实付约
-`$1.752/小时`。创建或修改 Endpoint 前必须重新检查实时价格与目标 Volume 数据中心库存。
+US-KS-2 的 `NVIDIA L40` 48GB，不配置其他型号回退。Secure Pod 与 Serverless 的硬上限
+都是 `$3/小时`；2026-08-30 的 Serverless Flex 官方价约 `$1.908/小时`。Queue-based
+Serverless 没有 MIG48 pool。创建或修改 Endpoint 前必须重新检查实时价格与目标 Volume
+数据中心库存。
 
 ## 许可证与内容边界
 

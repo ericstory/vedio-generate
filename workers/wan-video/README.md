@@ -6,8 +6,9 @@
 
 ## 生产规格
 
-- GPU：与 V1 相同的 `NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb`；历史
-  Serverless 实付约 `$1.752/小时`，低于 `$3/小时`硬上限，创建前仍需复查实时价格和库存。
+- GPU：与 V1 相同的 US-KS-2 `NVIDIA L40` 48GB；Serverless Flex 官方价约
+  `$1.908/小时`，低于 `$3/小时`硬上限，创建前仍需复查实时价格和库存。Queue-based
+  Serverless 没有 MIG48 pool，因此不能把 Pod 的 MIG48 选择直接用于 Endpoint。
 - 输出：4/5/6/8/10/12/15 秒、16fps、按时长生成 `4N+1` 帧；480p 或 720p；
   16:9、9:16、1:1、4:3、3:4 或 21:9。
 - 音频：`cvssp/audioldm2` 根据同一提示词生成同长度环境声/音效，最终 MP4 使用 AAC 音轨；
