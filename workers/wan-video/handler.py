@@ -46,7 +46,9 @@ def _progress(job: dict[str, Any], stage: str, **details: Any) -> None:
     payload = {"stage": stage, **details}
     print(json.dumps(payload, ensure_ascii=False), flush=True)
     progress_update = getattr(runpod.serverless, "progress_update", None)
-    if callable(progress_update):
+    # A one-shot GPU Pod has no Serverless heartbeat callback. Calling the SDK
+    # there only spawns a thread that retries the literal JOB_DONE_URL.
+    if os.getenv("RUNPOD_WEBHOOK_PING") and callable(progress_update):
         progress_update(job, payload)
 
 
@@ -99,20 +101,21 @@ def _require_models() -> None:
 
 
 def _generator() -> DiffGenerator:
-    """Keep the FP8 denoisers resident and offload only auxiliary components."""
+    """Keep the complete FP8 pipeline resident on the 96 GB production GPU."""
     global _GENERATOR
     if _GENERATOR is None:
         _require_models()
+        aux_cpu_offload = os.getenv("WAN_AUX_CPU_OFFLOAD", "0") == "1"
         generator = DiffGenerator.from_pretrained(
             model_path=str(BASE_MODEL_ROOT),
             num_gpus=1,
-            performance_mode="manual",
-            attention_backend=os.getenv("WAN_ATTENTION_BACKEND", "fa"),
+            performance_mode="speed",
+            attention_backend=os.getenv("WAN_ATTENTION_BACKEND", "torch_sdpa"),
             dit_cpu_offload=False,
             dit_layerwise_offload=False,
-            text_encoder_cpu_offload=True,
-            vae_cpu_offload=True,
-            pin_cpu_memory=True,
+            text_encoder_cpu_offload=aux_cpu_offload,
+            vae_cpu_offload=aux_cpu_offload,
+            pin_cpu_memory=aux_cpu_offload,
             enable_torch_compile=False,
             warmup_mode="off",
             lora_merge_mode="dynamic",
@@ -337,7 +340,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
                 "WAN_MODEL_VERSION", "2c5a06469cd2255816eb2e46b8e11600ed435d52"
             ),
             "workflow_version": os.getenv(
-                "WAN_WORKFLOW_VERSION", "wan22-t2v-fp8-adult-lora-audio-v4"
+                "WAN_WORKFLOW_VERSION", "wan22-t2v-fp8-resident96-adult-lora-audio-v5"
             ),
             "adult_adapter_id": os.getenv(
                 "WAN_ADULT_ADAPTER_ID", "lopi999/Wan2.2-I2V_General-NSFW-LoRA"

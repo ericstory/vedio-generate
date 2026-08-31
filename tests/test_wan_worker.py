@@ -54,7 +54,9 @@ def test_wan_handler_forces_both_denoiser_adapters() -> None:
     assert 'target=["transformer", "transformer_2"]' in source
     assert 'merge_mode="dynamic"' in source
     assert "dit_cpu_offload=False" in source
-    assert "text_encoder_cpu_offload=True" in source
+    assert 'performance_mode="speed"' in source
+    assert '"torch_sdpa"' in source
+    assert "text_encoder_cpu_offload=aux_cpu_offload" in source
 
 
 def test_wan_image_installs_complete_video_export_backend() -> None:
@@ -76,20 +78,21 @@ def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
     assert '"has_audio": generate_audio' in source
 
 
-def test_v1_and_v2_use_the_same_l40_gpu_policy_under_three_dollars() -> None:
+def test_v1_and_v2_use_the_same_pro6000_pod_policy_under_three_dollars() -> None:
     root = Path(__file__).parents[1] / "workers"
     ltx = json.loads((root / "ltx-video" / "gpu_policy.json").read_text())
     wan = json.loads((root / "wan-video" / "gpu_policy.json").read_text())
     for policy in (ltx, wan):
-        assert policy["minimum_vram_gb"] == 48
+        assert policy["minimum_vram_gb"] == 96
         assert policy["maximum_secure_price_usd_per_hour"] == 3.0
         assert policy["maximum_serverless_price_usd_per_hour"] == 3.0
-        assert policy["observed_serverless_price_usd_per_hour"] <= 3.0
-        assert policy["serverless_provisioning_blocked"] is False
+        assert policy["observed_serverless_price_usd_per_hour"] > 3.0
+        assert policy["serverless_provisioning_blocked"] is True
         assert policy["allow_fallback_gpu_types"] is False
         assert [gpu["id"] for gpu in policy["gpu_types"]] == [
-            "NVIDIA L40"
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition"
         ]
+        assert policy["gpu_types"][0]["secure_price_usd_per_hour"] < 3.0
 
 
 def test_wan_fp8_model_is_pinned_and_stage_timings_are_reported() -> None:

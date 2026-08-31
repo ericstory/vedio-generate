@@ -4,14 +4,15 @@
 
 速度修订（2026-08-30）：旧版约 126GB BF16 + CPU offload 在 H100 上曾有一个 15 秒 720p
 任务跑满两小时后失败，单任务约花 `$9.97`，因此不再作为生产方案。V2 改为 NVIDIA 官方
-约 45GB ModelOpt FP8 权重 + SGLang 动态双 LoRA；V1/V2 下一轮统一在 US-KS-2 的 L40
-48GB 上验证，Serverless Flex 约 `$1.908/小时`，硬上限 `$3/小时`。
+约 45GB ModelOpt FP8 权重 + SGLang 动态双 LoRA。真实加载测试证明 L40 的 44.39GiB
+可用显存不足，文本编码器阶段 OOM；V1/V2 下一轮统一在 US-KS-2 的 RTX PRO 6000 96GB
+Secure Pod 验证，`$2.09/小时`，硬上限 `$3/小时`。该卡 Serverless 为 `$3.49/小时`，禁用。
 
 ## 结论
 
 保留已经上线的 PinkCherry LTX 2.3 作为 V1，不原地替换。V2 建立一条完全独立的
 Wan 2.2 A14B 质量链路，共用 Railway 的登录、任务列表和成品存储，但使用独立的
-Worker 镜像、RunPod Serverless Endpoint、Network Volume、模型配置和成本熔断器。
+Worker 镜像、RunPod 按需 Pod 生命周期、Network Volume、模型配置和成本熔断器。
 
 首轮验证顺序：
 
@@ -113,19 +114,16 @@ Wan 2.2 A14B 是高/低噪声双专家 MoE，总参数约 27B、每步激活约 
 因此 V2 新卷使用 70GB，给约 50.73GB 模型及 Hub 元数据保留空间。旧 150GB BF16 卷在
 FP8 实机验收完成前保留，验收后再由所有者确认删除。
 
-2026-08-30 的只读 RunPod 库存与官方价格核验：
+2026-08-30 的真实 RunPod 验证与价格核验：
 
-- L40 48GB：Secure Pod 标价约 `$0.82/h`，US-KS-2 库存 Low。
-- ADA_48_PRO Serverless Flex 价约 `$1.908/h`；通过排除 L40S 与 RTX 6000 Ada，把两条
-  Endpoint 都固定为 L40。Serverless 与 Pod 标价不是同一计费档。
+- L40 48GB：可用显存 44.39GiB；两套 FP8 专家加载后，文本编码器申请 3.91GiB 时 OOM。
+- RTX PRO 6000 96GB：US-KS-2 Secure Pod `$2.09/h`，精确 GPU ID 为
+  `NVIDIA RTX PRO 6000 Blackwell Server Edition`；两条链路都固定该型号。
+- RTX PRO 6000 Serverless `$3.49/h`，超过实验硬上限，因此不激活；旧验证 Endpoint 保持
+  `workersMax=0`，正式公平对比走按需 Pod。
 
-Queue-based Serverless 没有 BLACKWELL_48/MIG48 pool；Pod 的 MIG48 精确 GPU ID 不能直接
-用于 Endpoint。V1 和 V2 因此都固定为同一个 L40 精确 GPU ID，不配置 A100/H100/L40S 回退，
-避免投票混入硬件差异。实际创建卷或修改 Endpoint 前必须重新读取目标数据中心的逐区域库存和
-Serverless 价格，任何实际执行价超过 `$3/h` 都停止。Network Volume 会把 Endpoint 约束到对应区域。
-
-付费边界：代码、镜像和模型锁先完成；测试 Endpoint 空闲 `workersMin=0`。只在实测窗口把
-`workersMax` 设为 1，并用 30 分钟 execution timeout 限制首轮损失，任务终态立即缩回 0。
+付费边界：任务到达才创建精确 GPU Pod，单任务最多 30 分钟；成功、失败或超时都必须删除 Pod。
+任何实际执行价超过 `$3/h` 都停止。Network Volume 会把 Pod 约束到对应区域。
 
 ## 固定 A/B 验收
 
@@ -165,7 +163,7 @@ Serverless 价格，任何实际执行价超过 `$3/h` 都停止。Network Volum
 
 1. 创建 150GB Wan Network Volume。
 2. 启动临时 CPU/GPU Pod 下载模型。
-3. 创建或第一次调用 Wan Serverless Endpoint。
+3. 创建或第一次运行 Wan 按需 GPU Pod。
 4. 运行任何真实 A/B 视频任务。
 
 首轮只建立一个区域、一个卷、一个 Endpoint，`workersMin=0`、`workersMax=1`、execution
