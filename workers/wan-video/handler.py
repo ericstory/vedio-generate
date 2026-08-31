@@ -141,6 +141,11 @@ def _generator() -> DiffGenerator:
             # provisioning error instead of benchmarking the wrong backend.
             import sageattention  # noqa: F401
         aux_cpu_offload = os.getenv("WAN_AUX_CPU_OFFLOAD", "0") == "1"
+        # Dynamic application preserves the quantized FP8 base but supports only
+        # one adapter per target. Stacking the Lightning pair therefore requires
+        # merge mode, which re-bakes the quantized weights and trades a small
+        # base-precision cost for the few-step fast profile.
+        lora_merge_mode = "merge" if LIGHTNING_ENABLED else "dynamic"
         generator = DiffGenerator.from_pretrained(
             model_path=str(BASE_MODEL_ROOT),
             num_gpus=1,
@@ -153,10 +158,8 @@ def _generator() -> DiffGenerator:
             pin_cpu_memory=aux_cpu_offload,
             enable_torch_compile=False,
             warmup_mode="off",
-            lora_merge_mode="dynamic",
+            lora_merge_mode=lora_merge_mode,
         )
-        # Static FP8 weights cannot be destructively merged with LoRA. Dynamic
-        # application preserves the quantized base and addresses both Wan 2.2 experts.
         lora_names = ["adult_high", "adult_low"]
         lora_paths = [str(ADAPTER_HIGH), str(ADAPTER_LOW)]
         lora_targets = ["transformer", "transformer_2"]
@@ -171,7 +174,7 @@ def _generator() -> DiffGenerator:
             lora_paths,
             target=lora_targets,
             strength=lora_strengths,
-            merge_mode="dynamic",
+            merge_mode=lora_merge_mode,
         )
         _GENERATOR = generator
     return _GENERATOR

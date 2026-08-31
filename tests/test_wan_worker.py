@@ -53,7 +53,8 @@ def test_wan_handler_forces_both_denoiser_adapters() -> None:
     assert 'lora_names = ["adult_high", "adult_low"]' in source
     assert 'lora_targets = ["transformer", "transformer_2"]' in source
     assert "lora_strengths = [ADAPTER_STRENGTH, ADAPTER_STRENGTH]" in source
-    assert 'merge_mode="dynamic"' in source
+    assert 'lora_merge_mode = "merge" if LIGHTNING_ENABLED else "dynamic"' in source
+    assert "merge_mode=lora_merge_mode" in source
     assert "dit_cpu_offload=False" in source
     assert 'performance_mode="speed"' in source
     assert '"torch_sdpa"' in source
