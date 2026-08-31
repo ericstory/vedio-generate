@@ -55,11 +55,14 @@ class RunPodClient:
         """Explicit endpoint gate used as a cost guard around private jobs."""
         if workers_max not in {0, 1}:
             raise ValueError("private endpoint workers_max must be 0 or 1")
+        if self.settings.use_management_api_v1:
+            path = f"/endpoints/{self.settings.endpoint_id}"  # rp-migrate: keep-v1
+            payload = {"workersMax": workers_max, "workersMin": 0}
+        else:
+            path = f"/serverless/{self.settings.endpoint_id}"
+            payload = {"workers": {"max": workers_max, "min": 0}}
         try:
-            response = self._management_client.patch(
-                f"/endpoints/{self.settings.endpoint_id}",
-                json={"workersMax": workers_max, "workersMin": 0},
-            )
+            response = self._management_client.patch(path, json=payload)
         except httpx.HTTPError as exc:
             raise RunPodError(
                 "云 GPU 成本控制接口连接失败", error={"message": str(exc)}
@@ -260,21 +263,35 @@ class RunPodPodClient:
             "POD_RESULT_CALLBACK_URL": callback_url,
             "POD_RESULT_CALLBACK_TOKEN": self.settings.callback_token,
         }
-        payload = {
-            "name": f"papa-wan-{task_id[:12]}",
-            "templateId": self.settings.template_id,
-            "cloudType": "SECURE",
-            "computeType": "GPU",
-            "gpuTypeIds": [self.settings.gpu_id],
-            "gpuTypePriority": "custom",
-            "gpuCount": 1,
-            "dataCenterPriority": "custom",
-            "allowedCudaVersions": ["13.0"],
-            "volumeMountPath": self.settings.volume_mount_path,
-            "containerDiskInGb": 20,
-            "volumeInGb": 0,
-            "env": pod_env,
-        }
+        if self.settings.use_management_api_v1:
+            payload = {  # rp-migrate: keep-v1
+                "name": f"papa-wan-{task_id[:12]}",
+                "templateId": self.settings.template_id,
+                "cloudType": "SECURE",
+                "computeType": "GPU",
+                "gpuTypeIds": [self.settings.gpu_id],
+                "gpuTypePriority": "custom",
+                "gpuCount": 1,
+                "dataCenterPriority": "custom",
+                "allowedCudaVersions": ["13.0"],
+                "volumeMountPath": self.settings.volume_mount_path,
+                "containerDiskInGb": 20,
+                "volumeInGb": 0,
+                "env": pod_env,
+            }
+        else:
+            payload = {
+                "name": f"papa-wan-{task_id[:12]}",
+                "templateId": self.settings.template_id,
+                "cloud": "SECURE",
+                "gpu": {
+                    "id": self.settings.gpu_id,
+                    "count": 1,
+                    "allowedCudaVersions": ["13.0"],
+                },
+                "disk": 20,
+                "env": pod_env,
+            }
         lanes = [(self.settings.data_center_id, self.settings.network_volume_id)]
         if (
             self.settings.fallback_data_center_id
@@ -296,14 +313,31 @@ class RunPodPodClient:
             lane_payload = {
                 **payload,
                 "dataCenterIds": [data_center_id],
-                "networkVolumeId": network_volume_id,
             }
+            if self.settings.use_management_api_v1:
+                lane_payload["networkVolumeId"] = network_volume_id  # rp-migrate: keep-v1
+            else:
+                lane_payload["mounts"] = {
+                    "network": [
+                        {
+                            "volumeId": network_volume_id,
+                            "path": self.settings.volume_mount_path,
+                        }
+                    ]
+                }
             try:
                 pod = self._request("POST", "/pods", json=lane_payload)
                 selected_data_center = data_center_id
                 break
             except RunPodError as exc:
-                if "no instances currently available" not in exc.upstream_message.lower():
+                capacity_message = exc.upstream_message.lower()
+                if not any(
+                    phrase in capacity_message
+                    for phrase in (
+                        "no instances currently available",
+                        "no longer any instances available",
+                    )
+                ):
                     raise
                 last_capacity_error = exc
         if pod is None:
@@ -313,7 +347,11 @@ class RunPodPodClient:
         if not pod_id:
             raise RunPodError("RunPod 创建 Pod 后未返回编号")
         try:
-            price = float(pod.get("adjustedCostPerHr") or pod.get("costPerHr"))
+            if self.settings.use_management_api_v1:
+                raw_price = pod.get("adjustedCostPerHr") or pod.get("costPerHr")
+            else:
+                raw_price = pod.get("cost")
+            price = float(raw_price)
         except (TypeError, ValueError):
             self.delete_pod(pod_id)
             raise RunPodError("RunPod 创建 Pod 后未返回可验证价格")
@@ -322,8 +360,12 @@ class RunPodPodClient:
             raise RunPodError(
                 f"RunPod Pod price ${price:.2f}/h exceeds the configured cap"
             )
-        machine = pod.get("machine") if isinstance(pod.get("machine"), dict) else {}
-        actual_gpu = str(machine.get("gpuId") or "")
+        if self.settings.use_management_api_v1:
+            machine = pod.get("machine") if isinstance(pod.get("machine"), dict) else {}
+            actual_gpu = str(machine.get("gpuId") or "")
+        else:
+            gpu = pod.get("gpu") if isinstance(pod.get("gpu"), dict) else {}
+            actual_gpu = str(gpu.get("id") or "")
         if actual_gpu and actual_gpu != self.settings.gpu_id:
             self.delete_pod(pod_id)
             raise RunPodError(f"RunPod allocated unexpected GPU type: {actual_gpu}")
@@ -341,6 +383,11 @@ class RunPodPodClient:
 
     def get_task(self, pod_id: str) -> dict[str, Any]:
         pod = self._request("GET", f"/pods/{pod_id}")
-        runtime = str(pod.get("runtimeStatus") or pod.get("desiredStatus") or "").lower()
+        if self.settings.use_management_api_v1:
+            runtime = str(  # rp-migrate: keep-v1
+                pod.get("runtimeStatus") or pod.get("desiredStatus") or ""
+            ).lower()
+        else:
+            runtime = str(pod.get("status") or "").lower()
         status = "processing" if runtime in {"running", "initializing", "created"} else "queued"
         return {"id": pod_id, "status": status, "content": {}, "error": None}
