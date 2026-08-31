@@ -123,7 +123,7 @@ def load_runpod_settings(env_file: str | Path | None = None) -> RunPodSettings:
         api_base_url=os.getenv("RUNPOD_API_BASE_URL", "https://api.runpod.ai/v2").rstrip("/"),
         management_api_base_url=os.getenv(
             "RUNPOD_MANAGEMENT_API_BASE_URL",
-            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",  # rp-migrate: keep-v1
         ).rstrip("/"),
         use_management_api_v1=use_management_api_v1,
         model_id=os.getenv(
@@ -148,7 +148,7 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
         api_base_url=os.getenv("RUNPOD_API_BASE_URL", "https://api.runpod.ai/v2").rstrip("/"),
         management_api_base_url=os.getenv(
             "RUNPOD_MANAGEMENT_API_BASE_URL",
-            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",  # rp-migrate: keep-v1
         ).rstrip("/"),
         use_management_api_v1=use_management_api_v1,
         model_id=os.getenv("WAN_MODEL_ID", "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"),
@@ -204,7 +204,7 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
         callback_token=_required("VIDEO_UPLOAD_TOKEN"),
         api_base_url=os.getenv(
             "RUNPOD_MANAGEMENT_API_BASE_URL",
-            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",  # rp-migrate: keep-v1
         ).rstrip("/"),
         use_management_api_v1=use_management_api_v1,
         gpu_id=os.getenv(
