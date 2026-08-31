@@ -264,6 +264,9 @@ def test_wan_pod_uses_exact_gpu_volume_callback_and_price_cap() -> None:
     ]
     assert payload["env"]["POD_RESULT_CALLBACK_URL"].endswith("/local-task")
     assert payload["env"]["POD_RESULT_CALLBACK_TOKEN"] == "callback-secret"
+    assert payload["env"]["POD_PROGRESS_CALLBACK_URL"] == payload["env"][
+        "POD_RESULT_CALLBACK_URL"
+    ].replace("/pod-result", "/pod-progress")
     assert payload["env"]["MODEL_ROOT"] == "/runpod-volume/models"
     smoke_input = __import__("json").loads(payload["env"]["SMOKE_INPUT_JSON"])
     assert smoke_input["duration"] == 15

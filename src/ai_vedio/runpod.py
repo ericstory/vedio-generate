@@ -121,6 +121,13 @@ class RunPodClient:
             "inference_seconds",
             "video_inference_seconds",
             "audio_inference_seconds",
+            "model_load_seconds",
+            "audio_model_load_seconds",
+            "upload_seconds",
+            "attention_backend",
+            "inference_steps",
+            "guidance_scale",
+            "guidance_scale_2",
             "peak_memory_mb",
             "duration",
             "fps",
@@ -244,6 +251,11 @@ class RunPodPodClient:
         if not task_id:
             raise ValueError("task_id is required for the Wan Pod callback")
         callback_url = f"{self.settings.callback_url.rstrip('/')}/{task_id}"
+        # The live-progress route lives next to the terminal-result route; a
+        # customized callback URL without the standard suffix opts out cleanly.
+        progress_url = ""
+        if "/pod-result" in callback_url:
+            progress_url = callback_url.replace("/pod-result", "/pod-progress")
         smoke_input = {
             "prompt": prompt.strip(),
             "model_id": self.settings.model_id,
@@ -265,6 +277,8 @@ class RunPodPodClient:
             "POD_RESULT_CALLBACK_URL": callback_url,
             "POD_RESULT_CALLBACK_TOKEN": self.settings.callback_token,
         }
+        if progress_url:
+            pod_env["POD_PROGRESS_CALLBACK_URL"] = progress_url
         if self.settings.use_management_api_v1:
             # rp-migrate: keep-v1 start
             payload = {  # rp-migrate: keep-v1

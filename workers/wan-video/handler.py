@@ -50,6 +50,20 @@ def _progress(job: dict[str, Any], stage: str, **details: Any) -> None:
     # there only spawns a thread that retries the literal JOB_DONE_URL.
     if os.getenv("RUNPOD_WEBHOOK_PING") and callable(progress_update):
         progress_update(job, payload)
+    # Best-effort live stage reporting to the control plane. Generation must
+    # never fail or stall because the progress channel is down.
+    progress_url = os.getenv("POD_PROGRESS_CALLBACK_URL", "").strip()
+    token = os.getenv("POD_RESULT_CALLBACK_TOKEN", "")
+    if progress_url and token:
+        try:
+            httpx.post(
+                progress_url,
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+                timeout=5,
+            )
+        except httpx.HTTPError:
+            pass
 
 
 def _generate_audio_hidden_states(
@@ -105,6 +119,11 @@ def _generator() -> DiffGenerator:
     global _GENERATOR
     if _GENERATOR is None:
         _require_models()
+        if os.getenv("WAN_ATTENTION_BACKEND", "torch_sdpa") == "sage_attn":
+            # SGLang silently falls back to FlashAttention when sageattention
+            # is missing, and that fallback is unreliable on SM12.x. Surface a
+            # provisioning error instead of benchmarking the wrong backend.
+            import sageattention  # noqa: F401
         aux_cpu_offload = os.getenv("WAN_AUX_CPU_OFFLOAD", "0") == "1"
         generator = DiffGenerator.from_pretrained(
             model_path=str(BASE_MODEL_ROOT),
@@ -277,9 +296,14 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         audio = Path(directory) / "audio.wav"
         output = Path(directory) / "output.mp4"
         started = time.monotonic()
+        _progress(job, "model_load_start")
+        load_started = time.monotonic()
+        generator = _generator()
+        model_load_seconds = round(time.monotonic() - load_started, 3)
+        _progress(job, "model_load_done", seconds=model_load_seconds)
         _progress(job, "video_start", width=width, height=height, frames=num_frames)
         video_started = time.monotonic()
-        generation = _generator().generate(
+        generation = generator.generate(
             sampling_params_kwargs={
                 "prompt": prompt,
                 "negative_prompt": negative_prompt,
@@ -306,8 +330,14 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         _progress(job, "video_done", seconds=video_seconds)
         sample_rate = None
         audio_seconds = 0.0
+        audio_model_load_seconds = 0.0
         if generate_audio:
             torch.cuda.empty_cache()
+            _progress(job, "audio_model_load_start")
+            audio_load_started = time.monotonic()
+            _audio_pipeline()
+            audio_model_load_seconds = round(time.monotonic() - audio_load_started, 3)
+            _progress(job, "audio_model_load_done", seconds=audio_model_load_seconds)
             _progress(job, "audio_start")
             audio_started = time.monotonic()
             sample_rate = _generate_audio(
@@ -324,7 +354,9 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         inference_seconds = round(time.monotonic() - started, 3)
         key = f"videos/{job.get('id') or uuid4()}.mp4"
         _progress(job, "upload_start")
+        upload_started = time.monotonic()
         video_url = _upload(output, key)
+        upload_seconds = round(time.monotonic() - upload_started, 3)
         _progress(job, "complete", seconds=round(time.monotonic() - started, 3))
         return {
             "video_url": video_url,
@@ -352,6 +384,13 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "inference_seconds": inference_seconds,
             "video_inference_seconds": video_seconds,
             "audio_inference_seconds": audio_seconds,
+            "model_load_seconds": model_load_seconds,
+            "audio_model_load_seconds": audio_model_load_seconds,
+            "upload_seconds": upload_seconds,
+            "attention_backend": os.getenv("WAN_ATTENTION_BACKEND", "torch_sdpa"),
+            "inference_steps": int(os.getenv("WAN_INFERENCE_STEPS", "40")),
+            "guidance_scale": float(os.getenv("WAN_GUIDANCE_SCALE", "4.0")),
+            "guidance_scale_2": float(os.getenv("WAN_GUIDANCE_SCALE_2", "3.0")),
             "peak_memory_mb": generation.peak_memory_mb,
             "duration": duration,
             "fps": FPS,

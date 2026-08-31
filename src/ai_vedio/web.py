@@ -193,6 +193,26 @@ class TaskStore:
                 ),
             )
 
+    def update_progress(self, task_id: str, progress: dict[str, Any]) -> bool:
+        """Merge a live worker stage into provider_metadata without touching
+        status, video_url, or error; terminal tasks ignore stale reports."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT status, provider_metadata FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if not row or row["status"] in TERMINAL_STATUSES:
+                return False
+            provider_metadata: dict[str, Any] = {}
+            if row["provider_metadata"]:
+                with suppress(ValueError, TypeError):
+                    provider_metadata = json.loads(row["provider_metadata"])
+            provider_metadata["progress"] = progress
+            db.execute(
+                "UPDATE tasks SET provider_metadata=?, updated_at=? WHERE id=?",
+                (json.dumps(provider_metadata, ensure_ascii=False), _now(), task_id),
+            )
+            return True
+
     def vote(self, task_id: str, vote: int) -> dict[str, Any] | None:
         if vote not in {-1, 1}:
             raise ValueError("quality vote must be -1 or 1")
@@ -642,6 +662,29 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         if pod_id:
             background_tasks.add_task(delete_wan_pod, pod_id)
         return {"ok": True}
+
+    @app.post(f"{settings.base_path}/api/internal/pod-progress/{{task_id}}")
+    async def receive_pod_progress(request: Request, task_id: str):
+        configured_token = settings.video_upload_token
+        supplied = request.headers.get("authorization", "")
+        if not configured_token:
+            raise HTTPException(status_code=503, detail="Pod 回调通道尚未配置")
+        if not hmac.compare_digest(supplied, f"Bearer {configured_token}"):
+            raise HTTPException(status_code=401, detail="Pod 回调凭据无效")
+        store: TaskStore = request.app.state.store
+        task = store.get(task_id)
+        if not task or task.get("provider") != "runpod_wan_pod":
+            raise HTTPException(status_code=404, detail="Pod 任务不存在")
+        body = await request.json()
+        stage = str(body.get("stage") or "").strip()
+        if not stage or len(stage) > 64:
+            raise HTTPException(status_code=422, detail="进度阶段无效")
+        progress: dict[str, Any] = {"stage": stage, "at": _now()}
+        seconds = body.get("seconds")
+        if isinstance(seconds, (int, float)):
+            progress["seconds"] = round(float(seconds), 3)
+        applied = store.update_progress(task_id, progress)
+        return {"ok": True, "applied": applied}
 
     @app.get(f"{settings.base_path}/media/{{filename}}")
     async def generated_video(request: Request, filename: str):

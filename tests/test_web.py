@@ -168,6 +168,77 @@ def test_wan_pod_callback_commits_result_and_deletes_billed_pod(
     assert deleted == ["pod-123"]
 
 
+def test_wan_pod_progress_updates_stage_without_touching_status(tmp_path: Path) -> None:
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    store.create(
+        {
+            "id": "local-wan",
+            "provider": "runpod_wan_pod",
+            "provider_task_id": "pod-123",
+            "prompt": "测试",
+            "model": "wan-2.2-a14b-adult-v2",
+            "ratio": "16:9",
+            "resolution": "480p",
+            "duration": 4,
+            "has_reference": 0,
+            "status": "processing",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        unauthorized = client.post(
+            "/generate/api/internal/pod-progress/local-wan",
+            headers={"Authorization": "Bearer wrong"},
+            json={"stage": "video_start"},
+        )
+        assert unauthorized.status_code == 401
+        response = client.post(
+            "/generate/api/internal/pod-progress/local-wan",
+            headers={"Authorization": "Bearer callback-token"},
+            json={"stage": "video_start", "seconds": 12.5},
+        )
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    task = store.get("local-wan")
+    assert task and task["status"] == "processing"
+    assert task["provider_metadata"]["progress"]["stage"] == "video_start"
+    assert task["provider_metadata"]["progress"]["seconds"] == 12.5
+
+
+def test_wan_pod_progress_ignores_terminal_tasks(tmp_path: Path) -> None:
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    store.create(
+        {
+            "id": "done-wan",
+            "provider": "runpod_wan_pod",
+            "provider_task_id": "pod-456",
+            "prompt": "测试",
+            "model": "wan-2.2-a14b-adult-v2",
+            "ratio": "16:9",
+            "resolution": "480p",
+            "duration": 4,
+            "has_reference": 0,
+            "status": "processing",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    store.update_remote("done-wan", {"status": "succeeded", "content": {}, "error": None})
+    app = create_app(settings)
+    with TestClient(app) as client:
+        response = client.post(
+            "/generate/api/internal/pod-progress/done-wan",
+            headers={"Authorization": "Bearer callback-token"},
+            json={"stage": "upload_start"},
+        )
+    assert response.status_code == 200
+    assert response.json()["applied"] is False
+    task = store.get("done-wan")
+    assert task and "progress" not in (task.get("provider_metadata") or {})
+
+
 def test_task_store_orders_newest_first(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "tasks.db")
     base = {

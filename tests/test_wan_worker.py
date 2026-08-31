@@ -72,6 +72,25 @@ def test_wan_image_installs_accelerate_for_audio_cpu_offload() -> None:
     assert '"accelerate>=1.6,<2"' in dockerfile
 
 
+def test_wan_image_ships_sage_attention_for_blackwell() -> None:
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert '"sageattention==2.2.0"' in dockerfile
+    assert 'TORCH_CUDA_ARCH_LIST="12.0"' in dockerfile
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert "import sageattention" in source
+
+
+def test_wan_handler_reports_live_stage_progress_and_split_timings() -> None:
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert '"POD_PROGRESS_CALLBACK_URL"' in source
+    assert '_progress(job, "model_load_start")' in source
+    assert '_progress(job, "audio_model_load_start")' in source
+    assert '"model_load_seconds": model_load_seconds' in source
+    assert '"audio_model_load_seconds": audio_model_load_seconds' in source
+    assert '"upload_seconds": upload_seconds' in source
+    assert '"attention_backend": os.getenv("WAN_ATTENTION_BACKEND"' in source
+
+
 def test_wan_handler_generates_and_muxes_prompt_conditioned_audio() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert "AudioLDM2Pipeline" in source

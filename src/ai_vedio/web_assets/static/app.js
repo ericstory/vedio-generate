@@ -14,6 +14,13 @@ const modelNames = {
   'seedance-2.0': 'Seedance 2.0'
 };
 const selfHostedModels = new Set(['pinkcherry-ltx-2.3-v1.8', 'wan-2.2-a14b-adult-v2']);
+const progressStageNames = {
+  model_load_start: '正在加载视频模型', model_load_done: '视频模型就绪',
+  video_start: '视频推理中', video_done: '视频推理完成',
+  audio_model_load_start: '正在加载音频模型', audio_model_load_done: '音频模型就绪',
+  audio_start: '音频生成中', audio_done: '音频生成完成',
+  upload_start: '正在上传结果', complete: '收尾中'
+};
 
 function escapeHtml(value='') {
   const node = document.createElement('span'); node.textContent = value; return node.innerHTML;
@@ -90,7 +97,11 @@ function renderDetail(task) {
   const container=$('#result-video');
   if(task.status==='succeeded' && task.video_url) container.innerHTML=`<video controls autoplay muted playsinline src="${escapeHtml(task.video_url)}"></video><a class="download-link" href="${escapeHtml(task.video_url)}" target="_blank" rel="noopener">打开原视频 ↗</a>`;
   else if(kind==='failed') container.innerHTML='<div class="result-placeholder failed-mark"><span>!</span><b>生成未完成</b><small>请检查失败原因后重新尝试</small></div>';
-  else container.innerHTML='<div class="result-placeholder"><span class="loader"></span><b>正在创作中</b><small>通常需要几分钟，请稍候</small></div>';
+  else {
+    const stage=task.provider_metadata && task.provider_metadata.progress && task.provider_metadata.progress.stage;
+    const stageLabel=progressStageNames[stage];
+    container.innerHTML=`<div class="result-placeholder"><span class="loader"></span><b>${stageLabel?escapeHtml(stageLabel):'正在创作中'}</b><small>通常需要几分钟，请稍候</small></div>`;
+  }
 }
 function resetComposer() { state.selected=null; renderTasks(); $('#detail-view').hidden=true; $('#composer-view').hidden=false; closeSidebar(); $('#prompt').focus(); }
 function openSidebar(){ $('#sidebar').classList.add('open'); $('#sidebar-scrim').classList.add('open'); }

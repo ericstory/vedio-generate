@@ -28,6 +28,14 @@ RUN pip install --break-system-packages --no-cache-dir "imageio==2.37.0"
 # fully billed video inference.
 RUN pip install --break-system-packages --no-cache-dir "accelerate>=1.6,<2"
 
+# SGLang defaults SM12.x (RTX PRO 6000 Blackwell) to plain Torch SDPA because
+# its FlashAttention wheels do not cover that arch. SageAttention 2.2 provides
+# the fast quantized attention path there; kernels are compiled for SM12.0 at
+# image build time, so no GPU is needed on the build host.
+RUN TORCH_CUDA_ARCH_LIST="12.0" pip install --break-system-packages --no-cache-dir \
+      --no-build-isolation "sageattention==2.2.0" \
+    && python -c "import sageattention"
+
 WORKDIR /app
 COPY handler.py worker_config.py smoke.py download_models.sh /app/
 RUN chmod 0755 /app/download_models.sh
