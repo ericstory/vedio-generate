@@ -103,3 +103,13 @@ def test_wan_fp8_model_is_pinned_and_stage_timings_are_reported() -> None:
     assert '"audio_inference_seconds": audio_seconds' in source
     assert '_progress(job, "video_start"' in source
     assert '_progress(job, "complete"' in source
+
+
+def test_wan_handler_can_be_imported_by_one_shot_pod_smoke_runner() -> None:
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    smoke = (WORKER_ROOT / "smoke.py").read_text(encoding="utf-8")
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert 'if __name__ == "__main__":' in source
+    assert 'from handler import handler' in smoke
+    assert '"event": "smoke_complete"' in smoke
+    assert "COPY handler.py worker_config.py smoke.py download_models.sh" in dockerfile

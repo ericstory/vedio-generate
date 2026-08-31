@@ -24,6 +24,6 @@ RUN pip install --break-system-packages --no-cache-dir \
 RUN pip install --break-system-packages --no-cache-dir "imageio==2.37.0"
 
 WORKDIR /app
-COPY handler.py worker_config.py download_models.sh /app/
+COPY handler.py worker_config.py smoke.py download_models.sh /app/
 RUN chmod 0755 /app/download_models.sh
 CMD ["python", "/app/handler.py"]

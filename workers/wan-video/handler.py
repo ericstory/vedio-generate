@@ -365,7 +365,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-if os.getenv("EAGER_LOAD_MODELS", "1") == "1":
-    _generator()
-
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    if os.getenv("EAGER_LOAD_MODELS", "1") == "1":
+        _generator()
+    runpod.serverless.start({"handler": handler})
