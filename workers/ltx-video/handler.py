@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -145,6 +146,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory(prefix="ltx-job-") as directory:
         output = Path(directory) / "output.mp4"
+        started = time.monotonic()
         # LTX's official CLI runs the complete pipeline under inference mode.
         # The returned video is a lazy iterator, so encode_video must stay inside
         # the same context: consuming it performs the actual VAE decode.
@@ -170,6 +172,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
                 video_chunks_number=get_video_chunks_number(result.num_frames, result.tiling_config),
                 color_space=None,
             )
+        inference_seconds = round(time.monotonic() - started, 3)
         key = f"videos/{job.get('id') or uuid4()}.mp4"
         return {
             "video_url": _upload(output, key),
@@ -181,10 +184,20 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "workflow_version": os.getenv(
                 "SELF_HOSTED_WORKFLOW_VERSION", "pinkcherry-native-two-stage-v1"
             ),
+            "gpu_name": torch.cuda.get_device_name(),
+            "engine": "ltx-pipelines",
+            "inference_seconds": inference_seconds,
+            "video_inference_seconds": inference_seconds,
+            "duration": duration,
+            "fps": FPS,
+            "frame_count": frame_count(duration),
+            "width": width,
+            "height": height,
+            "has_audio": True,
         }
 
 
-if os.getenv("EAGER_LOAD_MODELS", "1") == "1":
-    _pipeline()
-
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    if os.getenv("EAGER_LOAD_MODELS", "1") == "1":
+        _pipeline()
+    runpod.serverless.start({"handler": handler})

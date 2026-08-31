@@ -110,3 +110,14 @@ def test_pipeline_runs_under_torch_inference_mode() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "encode_video" in calls, "lazy VAE decode must remain inside inference mode"
+
+
+def test_ltx_has_one_shot_same_hardware_runner_and_timing_metadata() -> None:
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    smoke = (WORKER_ROOT / "smoke.py").read_text(encoding="utf-8")
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert 'if __name__ == "__main__":' in source
+    assert '"video_inference_seconds": inference_seconds' in source
+    assert '"gpu_name": torch.cuda.get_device_name()' in source
+    assert '"event": "smoke_complete"' in smoke
+    assert "COPY smoke.py /app/smoke.py" in dockerfile

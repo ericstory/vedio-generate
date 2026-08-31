@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY handler.py /app/handler.py
+COPY smoke.py /app/smoke.py
 COPY worker_config.py /app/worker_config.py
 COPY download_models.sh /app/download_models.sh
 RUN chmod 0755 /app/download_models.sh
