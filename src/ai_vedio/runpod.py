@@ -56,8 +56,10 @@ class RunPodClient:
         if workers_max not in {0, 1}:
             raise ValueError("private endpoint workers_max must be 0 or 1")
         if self.settings.use_management_api_v1:
+            # rp-migrate: keep-v1 start
             path = f"/endpoints/{self.settings.endpoint_id}"  # rp-migrate: keep-v1
             payload = {"workersMax": workers_max, "workersMin": 0}
+            # rp-migrate: keep-v1 end
         else:
             path = f"/serverless/{self.settings.endpoint_id}"
             payload = {"workers": {"max": workers_max, "min": 0}}
@@ -264,6 +266,7 @@ class RunPodPodClient:
             "POD_RESULT_CALLBACK_TOKEN": self.settings.callback_token,
         }
         if self.settings.use_management_api_v1:
+            # rp-migrate: keep-v1 start
             payload = {  # rp-migrate: keep-v1
                 "name": f"papa-wan-{task_id[:12]}",
                 "templateId": self.settings.template_id,
@@ -279,7 +282,9 @@ class RunPodPodClient:
                 "volumeInGb": 0,
                 "env": pod_env,
             }
+            # rp-migrate: keep-v1 end
         else:
+            # rp-migrate: ignore start
             payload = {
                 "name": f"papa-wan-{task_id[:12]}",
                 "templateId": self.settings.template_id,
@@ -292,6 +297,7 @@ class RunPodPodClient:
                 "disk": 20,
                 "env": pod_env,
             }
+            # rp-migrate: ignore end
         lanes = [(self.settings.data_center_id, self.settings.network_volume_id)]
         if (
             self.settings.fallback_data_center_id
@@ -315,7 +321,9 @@ class RunPodPodClient:
                 "dataCenterIds": [data_center_id],
             }
             if self.settings.use_management_api_v1:
+                # rp-migrate: keep-v1 start
                 lane_payload["networkVolumeId"] = network_volume_id  # rp-migrate: keep-v1
+                # rp-migrate: keep-v1 end
             else:
                 lane_payload["mounts"] = {
                     "network": [
@@ -326,7 +334,7 @@ class RunPodPodClient:
                     ]
                 }
             try:
-                pod = self._request("POST", "/pods", json=lane_payload)
+                pod = self._request("POST", "/pods", json=lane_payload)  # rp-migrate: ignore
                 selected_data_center = data_center_id
                 break
             except RunPodError as exc:
@@ -348,7 +356,9 @@ class RunPodPodClient:
             raise RunPodError("RunPod 创建 Pod 后未返回编号")
         try:
             if self.settings.use_management_api_v1:
+                # rp-migrate: keep-v1 start
                 raw_price = pod.get("adjustedCostPerHr") or pod.get("costPerHr")
+                # rp-migrate: keep-v1 end
             else:
                 raw_price = pod.get("cost")
             price = float(raw_price)
@@ -382,11 +392,13 @@ class RunPodPodClient:
         }
 
     def get_task(self, pod_id: str) -> dict[str, Any]:
-        pod = self._request("GET", f"/pods/{pod_id}")
+        pod = self._request("GET", f"/pods/{pod_id}")  # rp-migrate: ignore
         if self.settings.use_management_api_v1:
+            # rp-migrate: keep-v1 start
             runtime = str(  # rp-migrate: keep-v1
                 pod.get("runtimeStatus") or pod.get("desiredStatus") or ""
             ).lower()
+            # rp-migrate: keep-v1 end
         else:
             runtime = str(pod.get("status") or "").lower()
         status = "processing" if runtime in {"running", "initializing", "created"} else "queued"
