@@ -16,6 +16,7 @@ RUN pip install --break-system-packages --no-cache-dir \
       "scipy==1.17.0" \
       "boto3>=1.40,<2" \
       "httpx>=0.28,<1" \
+    && pip install --break-system-packages --no-cache-dir --ignore-installed cryptography \
       "runpod>=1.8,<2"
 
 # Diffusers needs the imageio Python frontend in addition to imageio-ffmpeg.
