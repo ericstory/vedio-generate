@@ -47,5 +47,21 @@ WAN_WORKFLOW_VERSION=wan22-t2v-fp8-resident96-adult-lora-audio-v5
 EAGER_LOAD_MODELS=1
 ```
 
+Railway 的按需 Pod 控制面还需配置：
+
+```dotenv
+RUNPOD_WAN_POD_TEMPLATE_ID=<one-shot-template-id>
+RUNPOD_WAN_POD_NETWORK_VOLUME_ID=<70GB-US-KS-2-volume-id>
+RUNPOD_WAN_POD_CALLBACK_URL=https://your-host.example/generate/api/internal/pod-result
+RUNPOD_WAN_POD_GPU_ID=NVIDIA RTX PRO 6000 Blackwell Server Edition
+RUNPOD_WAN_POD_DATA_CENTER_ID=US-KS-2
+RUNPOD_WAN_POD_MAX_PRICE_PER_HOUR=3.0
+RUNPOD_WAN_POD_MAX_RUNTIME_SECONDS=1800
+```
+
+创建响应的实际价格超过上限或 GPU 型号不符时，控制面会立刻删除 Pod。Worker 上传成片、
+回调任务终态后保持进程存活，Railway 提交数据库结果后在后台删除计费 Pod；30 分钟未终态
+也会由成本熔断器强制删除。
+
 内容边界与 V1 相同：仅限合规的虚构成年人内容；拒绝未成年人、非自愿、兽交/乱伦和
 真人无授权色情深伪。

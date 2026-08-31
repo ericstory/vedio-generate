@@ -86,7 +86,7 @@ Wan 2.2 A14B 是高/低噪声双专家 MoE，总参数约 27B、每步激活约 
   → Railway control plane
       ├─ seedance-*              → BytePlus（现有）
       ├─ pinkcherry-ltx-v1       → RunPod LTX Endpoint（现有）
-      └─ wan-quality-v2          → RunPod Wan Endpoint（新增、独立）
+      └─ wan-quality-v2          → RunPod Wan 按需 Pod（新增、独立）
                                     ├─ Wan 2.2 T2V-A14B 双专家
                                     ├─ mandatory adult high/low LoRA
                                     ├─ AudioLDM2 环境声/音效
@@ -96,8 +96,8 @@ Wan 2.2 A14B 是高/低噪声双专家 MoE，总参数约 27B、每步激活约 
 隔离要求：
 
 - 新目录 `workers/wan-video/`，不修改 V1 Worker 的模型或依赖。
-- 新的 `RUNPOD_WAN_ENDPOINT_ID` 和 Wan 专属成本熔断器；V1、V2 各自最多一个 worker。
-- 新 Endpoint 保持 `workersMin=0`，空闲时不产生 GPU 费用。
+- 新的 `RUNPOD_WAN_POD_TEMPLATE_ID`、模型卷 ID 和 Wan 专属成本熔断器；V1、V2 各自最多一个任务。
+- Railway 创建 Pod 后校验实际单价与精确 GPU；Worker 回调终态后立即删除 Pod，空闲时无 GPU。
 - 新模型卷不复用现有 100GB PinkCherry 卷。
 - 任务记录必须保存 provider、模型 revision、adapter revision、seed、steps、尺寸、帧数、
   推理秒数和 GPU 类型，才能复现和比较。

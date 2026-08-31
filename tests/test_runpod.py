@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from ai_vedio.config import RunPodSettings
-from ai_vedio.runpod import RunPodClient, RunPodError
+from ai_vedio.config import RunPodPodSettings, RunPodSettings
+from ai_vedio.runpod import RunPodClient, RunPodError, RunPodPodClient
 
 
 def settings() -> RunPodSettings:
@@ -20,6 +20,16 @@ def wan_settings() -> RunPodSettings:
         adult_adapter_id="lopi999/Wan2.2-I2V_General-NSFW-LoRA",
         adult_adapter_version="adapter-revision",
         adult_adapter_strength=0.9,
+    )
+
+
+def wan_pod_settings() -> RunPodPodSettings:
+    return RunPodPodSettings(
+        api_key="secret",
+        template_id="template",
+        network_volume_id="volume",
+        callback_url="https://private.example/generate/api/internal/pod-result",
+        callback_token="callback-secret",
     )
 
 
@@ -207,4 +217,79 @@ def test_wan_job_always_submits_locked_adult_adapter() -> None:
     assert payload["adult_adapter_version"] == "adapter-revision"
     assert payload["adult_adapter_strength"] == 0.9
     assert payload["generate_audio"] is True
+    client.close()
+
+
+def test_wan_pod_uses_exact_gpu_volume_callback_and_price_cap() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"env": {"MODEL_ROOT": "/runpod-volume/models"}})
+        return httpx.Response(
+            201,
+            json={
+                "id": "pod-123",
+                "costPerHr": 2.09,
+                "machine": {"gpuId": "NVIDIA RTX PRO 6000 Blackwell Server Edition"},
+            },
+        )
+
+    client = RunPodPodClient(wan_pod_settings())
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="https://rest.runpod.io/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    result = client.create_text_video(
+        prompt="测试",
+        model="wan-2.2-a14b-adult-v2",
+        task_id="local-task",
+        ratio="21:9",
+        duration=15,
+        generate_audio=True,
+    )
+    assert result["id"] == "pod-123"
+    payload = __import__("json").loads(requests[1].content)
+    assert payload["gpuTypeIds"] == ["NVIDIA RTX PRO 6000 Blackwell Server Edition"]
+    assert payload["networkVolumeId"] == "volume"
+    assert payload["volumeMountPath"] == "/runpod-volume"
+    assert payload["env"]["POD_RESULT_CALLBACK_URL"].endswith("/local-task")
+    assert payload["env"]["POD_RESULT_CALLBACK_TOKEN"] == "callback-secret"
+    assert payload["env"]["MODEL_ROOT"] == "/runpod-volume/models"
+    smoke_input = __import__("json").loads(payload["env"]["SMOKE_INPUT_JSON"])
+    assert smoke_input["duration"] == 15
+    assert smoke_input["adult_adapter_strength"] == 0.9
+    client.close()
+
+
+def test_wan_pod_is_deleted_when_actual_price_exceeds_cap() -> None:
+    methods = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json={"env": {}})
+        if request.method == "POST":
+            return httpx.Response(201, json={"id": "over-cap", "costPerHr": 3.49})
+        return httpx.Response(204)
+
+    client = RunPodPodClient(wan_pod_settings())
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="https://rest.runpod.io/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(RunPodError, match="exceeds"):
+        client.create_text_video(
+            prompt="测试",
+            model="wan-2.2-a14b-adult-v2",
+            task_id="local-task",
+        )
+    assert methods == [
+        ("GET", "/v1/templates/template"),
+        ("POST", "/v1/pods"),
+        ("DELETE", "/v1/pods/over-cap"),
+    ]
     client.close()

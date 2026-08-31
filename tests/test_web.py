@@ -106,6 +106,68 @@ def test_worker_upload_is_private_and_saved_to_volume(tmp_path: Path) -> None:
         assert response.headers["content-type"] == "video/mp4"
 
 
+def test_wan_pod_callback_commits_result_and_deletes_billed_pod(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    store.create(
+        {
+            "id": "local-wan",
+            "provider": "runpod_wan_pod",
+            "provider_task_id": "pod-123",
+            "prompt": "测试",
+            "model": "wan-2.2-a14b-adult-v2",
+            "ratio": "16:9",
+            "resolution": "480p",
+            "duration": 4,
+            "has_reference": 0,
+            "status": "processing",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    store.update_remote(
+        "local-wan",
+        {
+            "status": "processing",
+            "content": {"pod_price_per_hour": 2.09},
+            "error": None,
+        },
+    )
+    deleted = []
+
+    class FakePodClient:
+        def delete_pod(self, pod_id: str):
+            deleted.append(pod_id)
+
+    def fake_pod_client():
+        yield FakePodClient()
+
+    monkeypatch.setattr(web, "_wan_pod_client", fake_pod_client)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        response = client.post(
+            "/generate/api/internal/pod-result/local-wan",
+            headers={"Authorization": "Bearer callback-token"},
+            json={
+                "status": "succeeded",
+                "content": {
+                    "video_url": "/generate/media/result.mp4",
+                    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                    "video_inference_seconds": 274.2,
+                },
+                "error": None,
+            },
+        )
+    assert response.status_code == 200
+    task = store.get("local-wan")
+    assert task and task["status"] == "succeeded"
+    assert task["video_url"] == "/generate/media/result.mp4"
+    assert task["provider_metadata"]["video_inference_seconds"] == 274.2
+    assert task["provider_metadata"]["pod_price_per_hour"] == 2.09
+    assert deleted == ["pod-123"]
+
+
 def test_task_store_orders_newest_first(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "tasks.db")
     base = {
@@ -319,10 +381,11 @@ def test_wan_v2_uses_independent_provider_with_long_audio_video(
             assert kwargs["duration"] == 15
             assert kwargs["ratio"] == "21:9"
             assert kwargs["generate_audio"] is True
+            assert kwargs["task_id"]
             return {"id": "wan-job-123", "status": "queued"}
 
     def provider_client(provider: str):
-        assert provider == "runpod_wan"
+        assert provider == "runpod_wan_pod"
         yield FakeWan()
 
     monkeypatch.setattr(web, "_provider_client", provider_client)
@@ -345,7 +408,7 @@ def test_wan_v2_uses_independent_provider_with_long_audio_video(
             },
         )
     assert response.status_code == 201
-    assert response.json()["task"]["provider"] == "runpod_wan"
+    assert response.json()["task"]["provider"] == "runpod_wan_pod"
 
 
 def test_wan_v2_is_hidden_and_rejected_until_enabled(tmp_path: Path) -> None:

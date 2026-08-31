@@ -115,4 +115,7 @@ def test_wan_handler_can_be_imported_by_one_shot_pod_smoke_runner() -> None:
     assert 'if __name__ == "__main__":' in source
     assert 'from handler import handler' in smoke
     assert '"event": "smoke_complete"' in smoke
+    assert '"POD_RESULT_CALLBACK_URL"' in smoke
+    assert '"pod_callback_complete"' in smoke
+    assert "_await_deletion" in smoke
     assert "COPY handler.py worker_config.py smoke.py download_models.sh" in dockerfile

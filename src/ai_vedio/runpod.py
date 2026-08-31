@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from time import sleep
 from typing import Any
 
 import httpx
 
-from .config import RunPodSettings
+from .config import RunPodPodSettings, RunPodSettings
 from .seedance import SeedanceError
 
 
@@ -182,3 +183,132 @@ class RunPodClient:
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         return self._normalize(self._request("GET", f"/status/{task_id}"))
+
+
+class RunPodPodClient:
+    """Launch one exact, price-capped GPU Pod for a private Wan task."""
+
+    def __init__(self, settings: RunPodPodSettings, *, timeout: float = 60.0) -> None:
+        self.settings = settings
+        self._client = httpx.Client(
+            base_url=settings.api_base_url,
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        try:
+            response = self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise RunPodError("云 GPU Pod 管理接口连接失败", error={"message": str(exc)}) from exc
+        if response.status_code == 204:
+            return {}
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RunPodError(
+                f"RunPod Pod API returned HTTP {response.status_code} with invalid JSON",
+                status_code=response.status_code,
+            ) from exc
+        if response.is_error:
+            error = body.get("error", body) if isinstance(body, dict) else body
+            raise RunPodError(
+                f"RunPod Pod API HTTP {response.status_code}: {error}",
+                status_code=response.status_code,
+                error=error,
+            )
+        return body
+
+    def delete_pod(self, pod_id: str) -> None:
+        try:
+            self._request("DELETE", f"/pods/{pod_id}")
+        except RunPodError as exc:
+            if exc.status_code != 404:
+                raise
+
+    def create_text_video(self, *, prompt: str, model: str, **options: Any) -> dict[str, Any]:
+        if model != self.settings.ui_model_id:
+            raise ValueError(f"Unknown self-hosted Pod model: {model}")
+        task_id = str(options.get("task_id") or "").strip()
+        if not task_id:
+            raise ValueError("task_id is required for the Wan Pod callback")
+        callback_url = f"{self.settings.callback_url.rstrip('/')}/{task_id}"
+        smoke_input = {
+            "prompt": prompt.strip(),
+            "model_id": self.settings.model_id,
+            "model_version": self.settings.model_version,
+            "workflow_version": self.settings.workflow_version,
+            "ratio": options.get("ratio", "16:9"),
+            "resolution": options.get("resolution", "480p"),
+            "duration": options.get("duration", 5),
+            "generate_audio": options.get("generate_audio", True),
+            "adult_adapter_id": self.settings.adult_adapter_id,
+            "adult_adapter_version": self.settings.adult_adapter_version,
+            "adult_adapter_strength": self.settings.adult_adapter_strength,
+        }
+        template = self._request("GET", f"/templates/{self.settings.template_id}")
+        template_env = template.get("env") if isinstance(template.get("env"), dict) else {}
+        pod_env = {
+            **template_env,
+            "SMOKE_INPUT_JSON": json.dumps(smoke_input, ensure_ascii=False),
+            "POD_RESULT_CALLBACK_URL": callback_url,
+            "POD_RESULT_CALLBACK_TOKEN": self.settings.callback_token,
+        }
+        payload = {
+            "name": f"papa-wan-{task_id[:12]}",
+            "templateId": self.settings.template_id,
+            "cloudType": "SECURE",
+            "computeType": "GPU",
+            "gpuTypeIds": [self.settings.gpu_id],
+            "gpuTypePriority": "custom",
+            "gpuCount": 1,
+            "dataCenterIds": [self.settings.data_center_id],
+            "dataCenterPriority": "custom",
+            "allowedCudaVersions": ["13.0"],
+            "networkVolumeId": self.settings.network_volume_id,
+            "volumeMountPath": self.settings.volume_mount_path,
+            "containerDiskInGb": 20,
+            "volumeInGb": 0,
+            "env": pod_env,
+        }
+        pod = self._request("POST", "/pods", json=payload)
+        pod_id = str(pod.get("id") or "")
+        if not pod_id:
+            raise RunPodError("RunPod 创建 Pod 后未返回编号")
+        try:
+            price = float(pod.get("adjustedCostPerHr") or pod.get("costPerHr"))
+        except (TypeError, ValueError):
+            self.delete_pod(pod_id)
+            raise RunPodError("RunPod 创建 Pod 后未返回可验证价格")
+        if price > self.settings.maximum_price_per_hour:
+            self.delete_pod(pod_id)
+            raise RunPodError(
+                f"RunPod Pod price ${price:.2f}/h exceeds the configured cap"
+            )
+        machine = pod.get("machine") if isinstance(pod.get("machine"), dict) else {}
+        actual_gpu = str(machine.get("gpuId") or "")
+        if actual_gpu and actual_gpu != self.settings.gpu_id:
+            self.delete_pod(pod_id)
+            raise RunPodError(f"RunPod allocated unexpected GPU type: {actual_gpu}")
+        return {
+            "id": pod_id,
+            "status": "queued",
+            "content": {
+                "video_url": None,
+                "gpu_name": self.settings.gpu_id,
+                "pod_price_per_hour": price,
+            },
+            "error": None,
+        }
+
+    def get_task(self, pod_id: str) -> dict[str, Any]:
+        pod = self._request("GET", f"/pods/{pod_id}")
+        runtime = str(pod.get("runtimeStatus") or pod.get("desiredStatus") or "").lower()
+        status = "processing" if runtime in {"running", "initializing", "created"} else "queued"
+        return {"id": pod_id, "status": status, "content": {}, "error": None}

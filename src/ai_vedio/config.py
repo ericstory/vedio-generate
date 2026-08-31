@@ -63,6 +63,28 @@ class RunPodSettings:
     adult_adapter_strength: float = 1.0
 
 
+@dataclass(frozen=True)
+class RunPodPodSettings:
+    api_key: str
+    template_id: str
+    network_volume_id: str
+    callback_url: str
+    callback_token: str
+    api_base_url: str = "https://rest.runpod.io/v1"
+    gpu_id: str = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    data_center_id: str = "US-KS-2"
+    volume_mount_path: str = "/runpod-volume"
+    maximum_price_per_hour: float = 3.0
+    maximum_runtime_seconds: int = 1800
+    model_id: str = "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"
+    model_version: str = "2c5a06469cd2255816eb2e46b8e11600ed435d52"
+    workflow_version: str = "wan22-t2v-fp8-resident96-adult-lora-audio-v5"
+    ui_model_id: str = "wan-2.2-a14b-adult-v2"
+    adult_adapter_id: str = "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
+    adult_adapter_version: str = "aeef17d7fa51d753ab7d1004ddb4f218a95d756d"
+    adult_adapter_strength: float = 0.9
+
+
 def load_settings(env_file: str | Path | None = None) -> Settings:
     _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
     return Settings(
@@ -125,6 +147,46 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
             "WAN_WORKFLOW_VERSION", "wan22-t2v-fp8-resident96-adult-lora-audio-v5"
         ),
         ui_model_id="wan-2.2-a14b-adult-v2",
+        adult_adapter_id=os.getenv(
+            "WAN_ADULT_ADAPTER_ID", "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
+        ),
+        adult_adapter_version=os.getenv(
+            "WAN_ADULT_ADAPTER_VERSION", "aeef17d7fa51d753ab7d1004ddb4f218a95d756d"
+        ),
+        adult_adapter_strength=float(os.getenv("WAN_ADULT_ADAPTER_STRENGTH", "0.9")),
+    )
+
+
+def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
+    """Load the price-capped, exact-GPU Wan Pod lane."""
+    _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    return RunPodPodSettings(
+        api_key=_required("RUNPOD_API_KEY"),
+        template_id=_required("RUNPOD_WAN_POD_TEMPLATE_ID"),
+        network_volume_id=_required("RUNPOD_WAN_POD_NETWORK_VOLUME_ID"),
+        callback_url=_required("RUNPOD_WAN_POD_CALLBACK_URL"),
+        callback_token=_required("VIDEO_UPLOAD_TOKEN"),
+        api_base_url=os.getenv(
+            "RUNPOD_MANAGEMENT_API_BASE_URL", "https://rest.runpod.io/v1"
+        ).rstrip("/"),
+        gpu_id=os.getenv(
+            "RUNPOD_WAN_POD_GPU_ID",
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        ),
+        data_center_id=os.getenv("RUNPOD_WAN_POD_DATA_CENTER_ID", "US-KS-2"),
+        maximum_price_per_hour=float(
+            os.getenv("RUNPOD_WAN_POD_MAX_PRICE_PER_HOUR", "3.0")
+        ),
+        maximum_runtime_seconds=int(
+            os.getenv("RUNPOD_WAN_POD_MAX_RUNTIME_SECONDS", "1800")
+        ),
+        model_id=os.getenv("WAN_MODEL_ID", "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"),
+        model_version=os.getenv(
+            "WAN_MODEL_VERSION", "2c5a06469cd2255816eb2e46b8e11600ed435d52"
+        ),
+        workflow_version=os.getenv(
+            "WAN_WORKFLOW_VERSION", "wan22-t2v-fp8-resident96-adult-lora-audio-v5"
+        ),
         adult_adapter_id=os.getenv(
             "WAN_ADULT_ADAPTER_ID", "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
         ),

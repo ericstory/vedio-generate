@@ -27,7 +27,7 @@ SELF_HOSTED_MODELS = frozenset({
 })
 SELF_HOSTED_PROVIDERS = {
     "pinkcherry-ltx-2.3-v1.8": "runpod",
-    "wan-2.2-a14b-adult-v2": "runpod_wan",
+    "wan-2.2-a14b-adult-v2": "runpod_wan_pod",
 }
 SEEDANCE_MODELS = frozenset(SUPPORTED_MODELS) - SELF_HOSTED_MODELS
 

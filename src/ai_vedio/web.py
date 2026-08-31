@@ -15,7 +15,7 @@ import sqlite3
 from typing import Any, Iterator
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -24,9 +24,10 @@ from .config import (
     PROJECT_ROOT,
     load_runpod_settings,
     load_settings,
+    load_wan_pod_settings,
     load_wan_runpod_settings,
 )
-from .runpod import RunPodClient, RunPodError
+from .runpod import RunPodClient, RunPodError, RunPodPodClient
 from .seedance import SeedanceClient, SeedanceError
 
 
@@ -161,7 +162,7 @@ class TaskStore:
         status = str(remote.get("status") or "processing")
         content = remote.get("content") or {}
         error = remote.get("error")
-        provider_metadata = {
+        new_metadata = {
             key: value
             for key, value in content.items()
             if key != "video_url" and value is not None
@@ -169,6 +170,14 @@ class TaskStore:
         if isinstance(error, (dict, list)):
             error = json.dumps(error, ensure_ascii=False)
         with self.connect() as db:
+            row = db.execute(
+                "SELECT provider_metadata FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            provider_metadata: dict[str, Any] = {}
+            if row and row["provider_metadata"]:
+                with suppress(ValueError, TypeError):
+                    provider_metadata = json.loads(row["provider_metadata"])
+            provider_metadata.update(new_metadata)
             db.execute(
                 """UPDATE tasks SET status=?, video_url=?, error=?, provider_metadata=?,
                 updated_at=? WHERE id=?""",
@@ -341,11 +350,21 @@ def _wan_runpod_client() -> Iterator[RunPodClient]:
         client.close()
 
 
-def _provider_client(provider: str) -> Iterator[SeedanceClient | RunPodClient]:
+def _wan_pod_client() -> Iterator[RunPodPodClient]:
+    client = RunPodPodClient(load_wan_pod_settings())
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+def _provider_client(provider: str) -> Iterator[SeedanceClient | RunPodClient | RunPodPodClient]:
     if provider == "runpod":
         return _runpod_client()
     if provider == "runpod_wan":
         return _wan_runpod_client()
+    if provider == "runpod_wan_pod":
+        return _wan_pod_client()
     return _client()
 
 
@@ -402,7 +421,40 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
             client_factory=_wan_runpod_client,
             shutdown_if_idle=shutdown_if_idle,
         )
-    return ltx_active or wan_active
+    wan_pod_active = False
+    if os.getenv("RUNPOD_WAN_POD_TEMPLATE_ID", "").strip():
+        active_tasks = store.active_runpod("runpod_wan_pod")
+        with suppress(SeedanceError, ValueError):
+            for client in _wan_pod_client():
+                for task in active_tasks:
+                    pod_id = task.get("provider_task_id") or task["id"]
+                    created_at = datetime.fromisoformat(task["created_at"])
+                    age = (datetime.now(timezone.utc) - created_at).total_seconds()
+                    if age > client.settings.maximum_runtime_seconds:
+                        client.delete_pod(pod_id)
+                        store.update_remote(
+                            task["id"],
+                            {
+                                "status": "failed",
+                                "content": {},
+                                "error": "Wan GPU Pod exceeded the 30 minute cost limit",
+                            },
+                        )
+                        continue
+                    try:
+                        client.get_task(pod_id)
+                    except RunPodError as exc:
+                        if exc.status_code == 404:
+                            store.update_remote(
+                                task["id"],
+                                {
+                                    "status": "expired",
+                                    "content": {},
+                                    "error": "Wan GPU Pod disappeared before returning a result",
+                                },
+                            )
+                wan_pod_active = bool(store.active_runpod("runpod_wan_pod"))
+    return ltx_active or wan_active or wan_pod_active
 
 
 def create_app(web_settings: WebSettings | None = None) -> FastAPI:
@@ -553,6 +605,44 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             await video.close()
         return {"video_url": f"{settings.base_path}/media/{filename}"}
 
+    def delete_wan_pod(pod_id: str) -> None:
+        with suppress(RunPodError, ValueError):
+            for client in _wan_pod_client():
+                client.delete_pod(pod_id)
+
+    @app.post(f"{settings.base_path}/api/internal/pod-result/{{task_id}}")
+    async def receive_pod_result(
+        request: Request,
+        task_id: str,
+        background_tasks: BackgroundTasks,
+    ):
+        configured_token = settings.video_upload_token
+        supplied = request.headers.get("authorization", "")
+        if not configured_token:
+            raise HTTPException(status_code=503, detail="Pod 回调通道尚未配置")
+        if not hmac.compare_digest(supplied, f"Bearer {configured_token}"):
+            raise HTTPException(status_code=401, detail="Pod 回调凭据无效")
+        store: TaskStore = request.app.state.store
+        task = store.get(task_id)
+        if not task or task.get("provider") != "runpod_wan_pod":
+            raise HTTPException(status_code=404, detail="Pod 任务不存在")
+        body = await request.json()
+        status = str(body.get("status") or "")
+        if status not in {"succeeded", "failed"}:
+            raise HTTPException(status_code=422, detail="Pod 回调状态无效")
+        store.update_remote(
+            task_id,
+            {
+                "status": status,
+                "content": body.get("content") if isinstance(body.get("content"), dict) else {},
+                "error": body.get("error"),
+            },
+        )
+        pod_id = str(task.get("provider_task_id") or "")
+        if pod_id:
+            background_tasks.add_task(delete_wan_pod, pod_id)
+        return {"ok": True}
+
     @app.get(f"{settings.base_path}/media/{{filename}}")
     async def generated_video(request: Request, filename: str):
         _require_auth(request)
@@ -638,6 +728,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             if len(raw) > MAX_IMAGE_BYTES:
                 raise HTTPException(status_code=413, detail="参考图不能超过 30MB")
             image_data_url = f"data:{reference.content_type};base64,{base64.b64encode(raw).decode()}"
+        task_id = str(uuid4())
         try:
             for client in _provider_client(provider):
                 options = dict(
@@ -647,6 +738,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                     generate_audio=generate_audio,
                     watermark=True,
                 )
+                if provider == "runpod_wan_pod":
+                    options["task_id"] = task_id
                 if image_data_url and not is_self_hosted:
                     remote = client.create_reference_video(
                         prompt=prompt, image_url=image_data_url, model=model, **options
@@ -660,7 +753,6 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         provider_task_id = str(remote.get("id") or "")
         if not provider_task_id:
             raise HTTPException(status_code=502, detail="生成服务未返回任务编号")
-        task_id = str(uuid4())
         created_at = _now()
         task = {
             "id": task_id,
@@ -675,7 +767,13 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             "status": str(remote.get("status") or "queued"),
             "created_at": created_at,
         }
-        store.create(task)
+        try:
+            store.create(task)
+            store.update_remote(task_id, remote)
+        except Exception:
+            if provider == "runpod_wan_pod":
+                delete_wan_pod(provider_task_id)
+            raise
         return {"task": store.get(task_id)}
 
     return app
