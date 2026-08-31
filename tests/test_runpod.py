@@ -51,7 +51,7 @@ def test_runpod_client_submits_ltx_job_and_normalizes_status() -> None:
         transport=httpx.MockTransport(handler),
     )
     client._management_client = httpx.Client(
-        base_url="https://rest.runpod.io/v1",
+        base_url="https://api.runpod.io/v2",
         transport=httpx.MockTransport(handler),
     )
     result = client.create_text_video(
@@ -68,10 +68,9 @@ def test_runpod_client_submits_ltx_job_and_normalizes_status() -> None:
         "error": None,
     }
     assert requests[0].method == "PATCH"
-    assert requests[0].url.path == "/v1/endpoints/endpoint"
+    assert requests[0].url.path == "/v2/serverless/endpoint"
     assert __import__("json").loads(requests[0].content) == {
-        "workersMax": 1,
-        "workersMin": 0,
+        "workers": {"max": 1, "min": 0},
     }
     assert requests[1].url.path == "/v2/endpoint/run"
     assert requests[1].url.params["ttl"] == "7200000"
@@ -133,14 +132,14 @@ def test_failed_submission_immediately_closes_gpu_gate() -> None:
         transport=httpx.MockTransport(job_handler),
     )
     client._management_client = httpx.Client(
-        base_url="https://rest.runpod.io/v1",
+        base_url="https://api.runpod.io/v2",
         transport=httpx.MockTransport(management_handler),
     )
     with pytest.raises(RunPodError):
         client.create_text_video(prompt="测试", model="pinkcherry-ltx-2.3-v1.8")
     assert management_payloads == [
-        {"workersMax": 1, "workersMin": 0},
-        {"workersMax": 0, "workersMin": 0},
+        {"workers": {"max": 1, "min": 0}},
+        {"workers": {"max": 0, "min": 0}},
     ]
     client.close()
 
@@ -176,7 +175,7 @@ def test_submission_retries_endpoint_activation_propagation() -> None:
         transport=httpx.MockTransport(job_handler),
     )
     client._management_client = httpx.Client(
-        base_url="https://rest.runpod.io/v1",
+        base_url="https://api.runpod.io/v2",
         transport=httpx.MockTransport(management_handler),
     )
     result = client.create_text_video(
@@ -185,7 +184,7 @@ def test_submission_retries_endpoint_activation_propagation() -> None:
     )
     assert result["id"] == "rp-retried"
     assert job_attempts == 3
-    assert management_payloads == [{"workersMax": 1, "workersMin": 0}]
+    assert management_payloads == [{"workers": {"max": 1, "min": 0}}]
     client.close()
 
 
@@ -204,7 +203,7 @@ def test_wan_job_always_submits_locked_adult_adapter() -> None:
         transport=httpx.MockTransport(handler),
     )
     client._management_client = httpx.Client(
-        base_url="https://rest.runpod.io/v1",
+        base_url="https://api.runpod.io/v2",
         transport=httpx.MockTransport(handler),
     )
     client.create_text_video(
@@ -234,15 +233,15 @@ def test_wan_pod_uses_exact_gpu_volume_callback_and_price_cap() -> None:
             201,
             json={
                 "id": "pod-123",
-                "costPerHr": 2.09,
-                "machine": {"gpuId": "NVIDIA RTX PRO 6000 Blackwell Server Edition"},
+                "cost": 2.09,
+                "gpu": {"id": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "count": 1},
             },
         )
 
     client = RunPodPodClient(wan_pod_settings())
     client._client.close()
     client._client = httpx.Client(
-        base_url="https://rest.runpod.io/v1",
+        base_url="https://api.runpod.io/v2",
         transport=httpx.MockTransport(handler),
     )
     result = client.create_text_video(
@@ -255,9 +254,14 @@ def test_wan_pod_uses_exact_gpu_volume_callback_and_price_cap() -> None:
     )
     assert result["id"] == "pod-123"
     payload = __import__("json").loads(requests[1].content)
-    assert payload["gpuTypeIds"] == ["NVIDIA RTX PRO 6000 Blackwell Server Edition"]
-    assert payload["networkVolumeId"] == "volume"
-    assert payload["volumeMountPath"] == "/runpod-volume"
+    assert payload["gpu"] == {
+        "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "count": 1,
+        "allowedCudaVersions": ["13.0"],
+    }
+    assert payload["mounts"]["network"] == [
+        {"volumeId": "volume", "path": "/runpod-volume"}
+    ]
     assert payload["env"]["POD_RESULT_CALLBACK_URL"].endswith("/local-task")
     assert payload["env"]["POD_RESULT_CALLBACK_TOKEN"] == "callback-secret"
     assert payload["env"]["MODEL_ROOT"] == "/runpod-volume/models"
@@ -275,13 +279,13 @@ def test_wan_pod_is_deleted_when_actual_price_exceeds_cap() -> None:
         if request.method == "GET":
             return httpx.Response(200, json={"env": {}})
         if request.method == "POST":
-            return httpx.Response(201, json={"id": "over-cap", "costPerHr": 3.49})
+            return httpx.Response(201, json={"id": "over-cap", "cost": 3.49})
         return httpx.Response(204)
 
     client = RunPodPodClient(wan_pod_settings())
     client._client.close()
     client._client = httpx.Client(
-        base_url="https://rest.runpod.io/v1",
+        base_url="https://api.runpod.io/v2",
         transport=httpx.MockTransport(handler),
     )
     with pytest.raises(RunPodError, match="exceeds"):
@@ -291,10 +295,38 @@ def test_wan_pod_is_deleted_when_actual_price_exceeds_cap() -> None:
             task_id="local-task",
         )
     assert methods == [
-        ("GET", "/v1/templates/template"),
-        ("POST", "/v1/pods"),
-        ("DELETE", "/v1/pods/over-cap"),
+        ("GET", "/v2/templates/template"),
+        ("POST", "/v2/pods"),
+        ("DELETE", "/v2/pods/over-cap"),
     ]
+    client.close()
+
+
+def test_runpod_v1_rollback_keeps_legacy_endpoint_gate_shape() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "endpoint"})
+
+    rollback_settings = RunPodSettings(
+        api_key="secret",
+        endpoint_id="endpoint",
+        management_api_base_url="https://rest.runpod.io/v1",
+        use_management_api_v1=True,
+    )
+    client = RunPodClient(rollback_settings)
+    client._management_client.close()
+    client._management_client = httpx.Client(
+        base_url="https://rest.runpod.io/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    client.set_workers_max(1)
+    assert requests[0].url.path == "/v1/endpoints/endpoint"
+    assert __import__("json").loads(requests[0].content) == {
+        "workersMax": 1,
+        "workersMin": 0,
+    }
     client.close()
 
 
@@ -315,15 +347,15 @@ def test_wan_pod_retries_each_pinned_region_volume_on_capacity_error() -> None:
             201,
             json={
                 "id": "fallback-pod",
-                "costPerHr": 2.09,
-                "machine": {"gpuId": "NVIDIA RTX PRO 6000 Blackwell Server Edition"},
+                "cost": 2.09,
+                "gpu": {"id": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "count": 1},
             },
         )
 
     client = RunPodPodClient(wan_pod_settings())
     client._client.close()
     client._client = httpx.Client(
-        base_url="https://rest.runpod.io/v1",
+        base_url="https://api.runpod.io/v2",
         transport=httpx.MockTransport(handler),
     )
     result = client.create_text_video(
@@ -334,9 +366,9 @@ def test_wan_pod_retries_each_pinned_region_volume_on_capacity_error() -> None:
     assert result["id"] == "fallback-pod"
     assert result["content"]["pod_data_center_id"] == "US-NC-2"
     assert posted[0]["dataCenterIds"] == ["US-KS-2"]
-    assert posted[0]["networkVolumeId"] == "volume"
+    assert posted[0]["mounts"]["network"][0]["volumeId"] == "volume"
     assert posted[1]["dataCenterIds"] == ["US-NE-1"]
-    assert posted[1]["networkVolumeId"] == "fallback-volume"
+    assert posted[1]["mounts"]["network"][0]["volumeId"] == "fallback-volume"
     assert posted[2]["dataCenterIds"] == ["US-NC-2"]
-    assert posted[2]["networkVolumeId"] == "nc2-volume"
+    assert posted[2]["mounts"]["network"][0]["volumeId"] == "nc2-volume"
     client.close()
