@@ -27,9 +27,21 @@ V1（PinkCherry LTX 2.3）与 V2（Wan 2.2 A14B FP8 + 成人 LoRA + AudioLDM2）
 
 ## 模板/镜像
 
-- Wan 模板：`wjxhc0dtid` → 镜像 `ed4470f19c328e98a13066d0366935887fe589a9`
+- Wan 模板：`wjxhc0dtid` → 镜像 `c11714b5340edc4ed8a0f1be5791c983fd7a1bee`
+  （含 SageAttention v2.2.0 SM12.0 源码编译；env `WAN_ATTENTION_BACKEND=sage_attn`）
 - LTX 模板：`km9g8f4guq` → 镜像 `87901bc5d36164d54f211b94efdc2f3165b8a2b8`
 - 两模板 registry 凭据：`cmtgxws1c003d14njrtc07zd2`
+
+## 加速与监控（2026-08-31 追加）
+
+- Wan 链路监控上线：worker 各阶段经 `POST /generate/api/internal/pod-progress/{task_id}`
+  实时回报，`provider_metadata` 携带 model_load/video/audio/upload 拆分计时与后端元数据，
+  UI 详情页显示实时阶段。Railway 部署 `b1921258`。
+- sage_attn 实测（480p/4s）：纯视频 227.9s（基线 ~281s），端到端 7.1 分钟（基线 13.8），
+  单次 ~$0.25。详见 `ab-wan-ltx-rtx-pro-6000.md` 追加章节，含 720p/12s 不可行结论与
+  参数上限换算表。
+- 实际事故记录：用户 720p/12s 任务必然触发 30 分钟上限，已按用户决定取消止损（~$0.56）。
+  UI 暂无参数上限提示，建议后续在前端对超上限组合给出预估与警告。
 
 ## 下一步建议
 
