@@ -86,8 +86,43 @@
 - **720p/12s**：sage 下仍估算 ≥45 分钟，**不可行**；需要降步数 + 提高上限，或等
   sage_attn3（Blackwell FP4，需源码构建）/ distill LoRA 方案
 
+## 追加：Lightning 4 步蒸馏 fast profile（2026-08-31 晚）
+
+需求：Wan 链路 12 秒片 ~5 分钟出，保持强制成人 LoRA。方案：lightx2v
+Wan2.2-Lightning Seko V2.0 4 步蒸馏 LoRA（revision `18bccf88`，SHA256 已入
+models.lock）+ CFG 1.0/1.0 + flow_shift 5.0 + sage_attn。
+
+实施途中命中 sglang v0.5.16 两个真实限制（各花一次付费运行确认）：
+
+1. dynamic LoRA 每个 target 仅支持一个 adapter（四 LoRA 叠加被拒）；
+2. merge 模式对 modelopt-FP8 底座存在维度 bug（`13824 vs 5120` FFN 张量不匹配）。
+
+最终方案：**离线把成人 LoRA（peft 格式）与 Lightning LoRA（comfy 格式）低秩拼接为
+单 adapter**（数学恒等；Lightning 块预除 0.9 抵消运行时全局强度，成人保持 0.9 等效、
+Lightning 1.0 等效），继续走已验证的 dynamic 单 adapter 路径。融合在 Pod 上执行，
+400/400 模块全对齐，输出确定性（多次重跑 SHA256 一致）：
+
+- `fused-lora/high_adult_lightning_v1.safetensors` sha256 `d8828255c7ef…`
+- `fused-lora/low_adult_lightning_v1.safetensors` sha256 `af75e5210cb0…`
+- 已写入 KS2/NC2 两卷；workflow `wan22-t2v-fp8-lightning4fused-adult-lora-audio-v7`
+
+验证结果（US-NC-2 同款 RTX PRO 6000）：
+
+| 参数 | 端到端（提交→出片） | 纯视频推理 | 模型加载 | 峰值显存 | 成本 |
+| --- | --- | --- | --- | --- | --- |
+| 480p/4s | **4 分 44 秒** | 22.6s（基线 281s，≈12×） | 89.9s | 64.8GB | ~$0.17 |
+| 720p/12s | **6 分 52 秒** | 230.3s（57.6s/步 ×4） | 134.2s | **91.3GB** | ~$0.24 |
+
+此前 720p/12s 在 40 步档三次撞 30 分钟上限失败；fast profile 下首次通过。
+91.3GB 峰值说明 **720p/12s 已接近 96GB 单卡上限**，720p/15s 大概率 OOM，先不放开。
+
+注意：4 步蒸馏 + LoRA 融合是画质敏感变更，两个验证视频
+（`41b5f652…mp4`、`7f2cbc52…mp4`）与真实成人提示词的效果需用户盲评验收；
+40 步质量档可随时通过模板 env 回切（adapter 路径换回原文件 + 步数/CFG 还原）。
+
 ## 后续
 
 - 质量 A/B 正式矩阵（`video-pipeline-v2.md` 的 6–10 提示词 × 3 seed 盲评）在此基础上执行。
-- sage_attn 为数值近似（INT8 量化注意力），验证视频（`f8563f15-…mp4`）需人工确认画质。
-- 可选二期加速：SageAttention3（Blackwell FP4）、降步数 profile、CFG 削减——均需盲评。
+- 端到端还剩 ~3.5 分钟固定开销（建 Pod + 拉镜像 + 模型加载 134s）；要进一步压缩需
+  warm pool / 常驻方案，或 [[本地 4090 V3 渠道]]（用户已提出，等机器信息）。
+- 可选二期：SageAttention3（Blackwell FP4）、AudioLDM2 步数下调。

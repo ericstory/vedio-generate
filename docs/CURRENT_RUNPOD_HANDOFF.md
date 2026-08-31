@@ -43,6 +43,21 @@ V1（PinkCherry LTX 2.3）与 V2（Wan 2.2 A14B FP8 + 成人 LoRA + AudioLDM2）
 - 实际事故记录：用户 720p/12s 任务必然触发 30 分钟上限，已按用户决定取消止损（~$0.56）。
   UI 暂无参数上限提示，建议后续在前端对超上限组合给出预估与警告。
 
+## Lightning fast profile（2026-08-31 晚追加）
+
+- Wan 现为 4 步蒸馏 fast profile：模板 adapter 指向 `fused-lora/{high,low}_adult_lightning_v1.safetensors`
+  （成人+Lightning 离线融合单 adapter，dynamic 模式），steps=4、CFG 1.0/1.0、flow_shift=5.0、
+  workflow `…lightning4fused…-v7`，镜像 `d7cd5ba1…`。
+- 实测：480p/4s 端到端 4 分 44 秒；**720p/12s 端到端 6 分 52 秒**（峰值 91.3GB，
+  已近 96GB 上限，720p/15s 勿放开）。画质待用户盲评，回切 40 步质量档只需还原模板 env。
+- sglang v0.5.16 两个已确认限制（勿踩）：dynamic 每 target 单 adapter；merge 模式对
+  modelopt-FP8 有维度 bug。
+- Railway Wan 通道当前主/兜底均为 **US-NC-2**（`nv7g5aobqn`），KS2 融合文件补齐后应恢复
+  KS2 主（`RUNPOD_WAN_POD_DATA_CENTER_ID=US-KS-2`、`NETWORK_VOLUME_ID=3xl6dvrx0p`、
+  fallback NE1 需先补 lightning+fused 文件或保持禁用）。
+- 运维教训：一次性 Pod 的删除保底必须独立于本地会话进程（本轮 NC2 下载 Pod 因守护进程
+  被清理多计费 ~70 分钟 ≈$2.7）。
+
 ## 下一步建议
 
 1. 用户人工验收两个视频（`/generate` 任务列表即可播放/下载；LTX one-shot 的视频不在
