@@ -50,8 +50,9 @@ def test_wan_prompt_policy_rejects_disallowed_combinations() -> None:
 def test_wan_handler_forces_both_denoiser_adapters() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert "DiffGenerator.from_pretrained" in source
-    assert '["adult_high", "adult_low"]' in source
-    assert 'target=["transformer", "transformer_2"]' in source
+    assert 'lora_names = ["adult_high", "adult_low"]' in source
+    assert 'lora_targets = ["transformer", "transformer_2"]' in source
+    assert "lora_strengths = [ADAPTER_STRENGTH, ADAPTER_STRENGTH]" in source
     assert 'merge_mode="dynamic"' in source
     assert "dit_cpu_offload=False" in source
     assert 'performance_mode="speed"' in source
