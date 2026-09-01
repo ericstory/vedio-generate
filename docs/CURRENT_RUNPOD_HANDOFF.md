@@ -60,6 +60,22 @@ V1（PinkCherry LTX 2.3）与 V2（Wan 2.2 A14B FP8 + 成人 LoRA + AudioLDM2）
 - 运维教训：一次性 Pod 的删除保底必须独立于本地会话进程（本轮 NC2 下载 Pod 因守护进程
   被清理多计费 ~70 分钟 ≈$2.7）。
 
+## 画质反馈与当前档位（2026-09-01）
+
+- 用户实测 4 步蒸馏画质不达标。已把 fast profile 升到 **8 步**
+  （workflow `…lightning8fused…-v8`，仅模板 env 变更），画质/速度中点，待用户复测。
+- 若 8 步仍不达标：模板还原三项即可回 40 步质量档（adapter 路径换回
+  `adult-lora/NSFW-22-*.safetensors`、steps=40、CFG 4.0/3.0、去掉 WAN_FLOW_SHIFT）。
+- 正解（下个会话）：**按请求选质量档**——UI 加"快速/质量"开关，payload 带 steps/profile
+  透传到 worker，两档共存不再全局切换。
+
+## 硬件统一决策（用户 2026-09-01 拍板）
+
+V1（LTX）、V2（Wan）、未来 V3 统一使用 `NVIDIA RTX PRO 6000 Blackwell Server Edition`。
+现状：V2 已是；**V1 生产链路仍在 H100 serverless（NE1）**，需迁移为 RTX PRO 6000
+一次性 Pod 模式（模板 `km9g8f4guq` 与 KS2/NC2 卷已就绪，缺的是把 web 的 LTX provider
+从 serverless 改为 pod 链路 + 回调，参照 Wan pod provider 实现）。属下个会话的工程任务。
+
 ## 下一步建议
 
 1. 用户人工验收两个视频（`/generate` 任务列表即可播放/下载；LTX one-shot 的视频不在
