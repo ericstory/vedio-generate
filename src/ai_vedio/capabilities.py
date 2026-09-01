@@ -13,6 +13,7 @@ class VideoDefaults:
 
 
 SUPPORTED_MODELS = (
+    "minimax-h3-pinkcherry",
     "wan-2.2-a14b-adult-v2",
     "pinkcherry-ltx-2.3-v1.8",
     "seedance-2.5",
@@ -24,11 +25,17 @@ SUPPORTED_MODELS = (
 SELF_HOSTED_MODELS = frozenset({
     "pinkcherry-ltx-2.3-v1.8",
     "wan-2.2-a14b-adult-v2",
+    "minimax-h3-pinkcherry",
 })
 SELF_HOSTED_PROVIDERS = {
     "pinkcherry-ltx-2.3-v1.8": "runpod",
     "wan-2.2-a14b-adult-v2": "runpod_wan_pod",
+    "minimax-h3-pinkcherry": "runpod_h3_pod",
 }
+# One-shot Pod lanes: the Worker reports its own terminal state and live stages
+# back over the authenticated internal callbacks, and the control plane deletes
+# the billed Pod as soon as the terminal callback commits.
+POD_PROVIDERS = frozenset({"runpod_wan_pod", "runpod_h3_pod"})
 SEEDANCE_MODELS = frozenset(SUPPORTED_MODELS) - SELF_HOSTED_MODELS
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "expired"})

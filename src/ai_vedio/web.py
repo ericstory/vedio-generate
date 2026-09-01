@@ -19,11 +19,17 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .capabilities import SELF_HOSTED_MODELS, SELF_HOSTED_PROVIDERS, SUPPORTED_MODELS
+from .capabilities import (
+    POD_PROVIDERS,
+    SELF_HOSTED_MODELS,
+    SELF_HOSTED_PROVIDERS,
+    SUPPORTED_MODELS,
+)
 from .config import (
     PROJECT_ROOT,
     load_runpod_settings,
     load_settings,
+    load_h3_pod_settings,
     load_wan_pod_settings,
     load_wan_runpod_settings,
 )
@@ -38,7 +44,10 @@ ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "im
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 MAX_VIDEO_BYTES = 250 * 1024 * 1024
 ALLOWED_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
-ALLOWED_RESOLUTIONS = {"480p", "720p", "1080p"}
+ALLOWED_RESOLUTIONS = {"480p", "720p", "768p", "1080p"}
+# MiniMax H3 resolves its canvas from a short edge, and 768 is the only value
+# MiniMax and SGLang publish recipes and reference outputs for.
+H3_MODEL = "minimax-h3-pinkcherry"
 ALLOWED_DURATIONS = set(range(4, 16))
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
 
@@ -57,6 +66,7 @@ class WebSettings:
     runpod_cost_guard_enabled: bool = False
     runpod_cost_guard_poll_seconds: float = 8.0
     wan_v2_enabled: bool = False
+    h3_enabled: bool = False
 
 
 def load_web_settings() -> WebSettings:
@@ -94,6 +104,7 @@ def load_web_settings() -> WebSettings:
             os.getenv("RUNPOD_COST_GUARD_POLL_SECONDS", "8")
         ),
         wan_v2_enabled=os.getenv("WAN_V2_ENABLED", "0") == "1",
+        h3_enabled=os.getenv("H3_ENABLED", "0") == "1",
     )
 
 
@@ -378,13 +389,38 @@ def _wan_pod_client() -> Iterator[RunPodPodClient]:
         client.close()
 
 
+def _h3_pod_client() -> Iterator[RunPodPodClient]:
+    client = RunPodPodClient(load_h3_pod_settings())
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+# Wrapped rather than bound directly so the lookup resolves the module
+# attribute at call time, which keeps the factories patchable in tests.
+POD_CLIENT_FACTORIES = {
+    "runpod_wan_pod": lambda: _wan_pod_client(),
+    "runpod_h3_pod": lambda: _h3_pod_client(),
+}
+POD_TEMPLATE_ENV_VARS = {
+    "runpod_wan_pod": "RUNPOD_WAN_POD_TEMPLATE_ID",
+    "runpod_h3_pod": "RUNPOD_H3_POD_TEMPLATE_ID",
+}
+POD_TIMEOUT_LABELS = {
+    "runpod_wan_pod": "Wan",
+    "runpod_h3_pod": "MiniMax H3",
+}
+
+
 def _provider_client(provider: str) -> Iterator[SeedanceClient | RunPodClient | RunPodPodClient]:
     if provider == "runpod":
         return _runpod_client()
     if provider == "runpod_wan":
         return _wan_runpod_client()
-    if provider == "runpod_wan_pod":
-        return _wan_pod_client()
+    pod_factory = POD_CLIENT_FACTORIES.get(provider)
+    if pod_factory is not None:
+        return pod_factory()
     return _client()
 
 
@@ -441,11 +477,14 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
             client_factory=_wan_runpod_client,
             shutdown_if_idle=shutdown_if_idle,
         )
-    wan_pod_active = False
-    if os.getenv("RUNPOD_WAN_POD_TEMPLATE_ID", "").strip():
-        active_tasks = store.active_runpod("runpod_wan_pod")
+    pod_active = False
+    for provider, client_factory in POD_CLIENT_FACTORIES.items():
+        if not os.getenv(POD_TEMPLATE_ENV_VARS[provider], "").strip():
+            continue
+        label = POD_TIMEOUT_LABELS[provider]
+        active_tasks = store.active_runpod(provider)
         with suppress(SeedanceError, ValueError):
-            for client in _wan_pod_client():
+            for client in client_factory():
                 for task in active_tasks:
                     pod_id = task.get("provider_task_id") or task["id"]
                     created_at = datetime.fromisoformat(task["created_at"])
@@ -457,7 +496,7 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
                             {
                                 "status": "failed",
                                 "content": {},
-                                "error": "Wan GPU Pod exceeded the 30 minute cost limit",
+                                "error": f"{label} GPU Pod exceeded the 30 minute cost limit",
                             },
                         )
                         continue
@@ -470,11 +509,11 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
                                 {
                                     "status": "expired",
                                     "content": {},
-                                    "error": "Wan GPU Pod disappeared before returning a result",
+                                    "error": f"{label} GPU Pod disappeared before returning a result",
                                 },
                             )
-                wan_pod_active = bool(store.active_runpod("runpod_wan_pod"))
-    return ltx_active or wan_active or wan_pod_active
+                pod_active = pod_active or bool(store.active_runpod(provider))
+    return ltx_active or wan_active or pod_active
 
 
 def create_app(web_settings: WebSettings | None = None) -> FastAPI:
@@ -519,6 +558,9 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         markup = markup.replace("__BASE_PATH__", settings.base_path)
         markup = markup.replace(
             "__WAN_V2_OPTION_STATE__", "" if settings.wan_v2_enabled else "disabled"
+        )
+        markup = markup.replace(
+            "__H3_OPTION_STATE__", "" if settings.h3_enabled else "disabled"
         )
         return HTMLResponse(markup)
 
@@ -625,9 +667,12 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             await video.close()
         return {"video_url": f"{settings.base_path}/media/{filename}"}
 
-    def delete_wan_pod(pod_id: str) -> None:
+    def delete_pod(provider: str, pod_id: str) -> None:
+        client_factory = POD_CLIENT_FACTORIES.get(provider)
+        if client_factory is None:
+            return
         with suppress(RunPodError, ValueError):
-            for client in _wan_pod_client():
+            for client in client_factory():
                 client.delete_pod(pod_id)
 
     @app.post(f"{settings.base_path}/api/internal/pod-result/{{task_id}}")
@@ -644,7 +689,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="Pod 回调凭据无效")
         store: TaskStore = request.app.state.store
         task = store.get(task_id)
-        if not task or task.get("provider") != "runpod_wan_pod":
+        if not task or task.get("provider") not in POD_PROVIDERS:
             raise HTTPException(status_code=404, detail="Pod 任务不存在")
         body = await request.json()
         status = str(body.get("status") or "")
@@ -660,7 +705,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         )
         pod_id = str(task.get("provider_task_id") or "")
         if pod_id:
-            background_tasks.add_task(delete_wan_pod, pod_id)
+            background_tasks.add_task(delete_pod, str(task["provider"]), pod_id)
         return {"ok": True}
 
     @app.post(f"{settings.base_path}/api/internal/pod-progress/{{task_id}}")
@@ -673,7 +718,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="Pod 回调凭据无效")
         store: TaskStore = request.app.state.store
         task = store.get(task_id)
-        if not task or task.get("provider") != "runpod_wan_pod":
+        if not task or task.get("provider") not in POD_PROVIDERS:
             raise HTTPException(status_code=404, detail="Pod 任务不存在")
         body = await request.json()
         stage = str(body.get("stage") or "").strip()
@@ -756,6 +801,17 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             )
         if is_self_hosted and resolution == "1080p":
             raise HTTPException(status_code=422, detail="自建模型首版仅支持 480p 或 720p")
+        if resolution == "768p" and model != H3_MODEL:
+            raise HTTPException(
+                status_code=422, detail="768p 只有 MiniMax H3 支持"
+            )
+        if model == H3_MODEL:
+            if not settings.h3_enabled:
+                raise HTTPException(status_code=503, detail="MiniMax H3 主线尚未启用")
+            if reference and reference.filename:
+                raise HTTPException(
+                    status_code=422, detail="H3 文生视频首版暂不接收参考图"
+                )
         if model == "pinkcherry-ltx-2.3-v1.8" and reference and reference.filename:
             raise HTTPException(status_code=422, detail="自建模型首版暂不支持参考图")
         if model == "wan-2.2-a14b-adult-v2":
@@ -788,7 +844,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                     generate_audio=generate_audio,
                     watermark=True,
                 )
-                if provider == "runpod_wan_pod":
+                if provider in POD_PROVIDERS:
                     options["task_id"] = task_id
                 if image_data_url and not is_self_hosted:
                     remote = client.create_reference_video(
@@ -821,8 +877,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             store.create(task)
             store.update_remote(task_id, remote)
         except Exception:
-            if provider == "runpod_wan_pod":
-                delete_wan_pod(provider_task_id)
+            if provider in POD_PROVIDERS:
+                delete_pod(provider, provider_task_id)
             raise
         return {"task": store.get(task_id)}
 

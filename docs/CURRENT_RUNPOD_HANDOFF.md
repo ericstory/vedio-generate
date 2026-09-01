@@ -71,16 +71,43 @@ V1（PinkCherry LTX 2.3）与 V2（Wan 2.2 A14B FP8 + 成人 LoRA + AudioLDM2）
 
 ## 硬件统一决策（用户 2026-09-01 拍板）
 
-V1（LTX）、V2（Wan）、未来 V3 统一使用 `NVIDIA RTX PRO 6000 Blackwell Server Edition`。
+V1（LTX）、V2（Wan）、未来新链路统一使用 `NVIDIA RTX PRO 6000 Blackwell Server Edition`。
 现状：V2 已是；**V1 生产链路仍在 H100 serverless（NE1）**，需迁移为 RTX PRO 6000
 一次性 Pod 模式（模板 `km9g8f4guq` 与 KS2/NC2 卷已就绪，缺的是把 web 的 LTX provider
-从 serverless 改为 pod 链路 + 回调，参照 Wan pod provider 实现）。属下个会话的工程任务。
+从 serverless 改为 pod 链路 + 回调，参照 Wan pod provider 实现）。
+
+选型复核见 [`model-gpu-selection-2026-09.md`](model-gpu-selection-2026-09.md)：
+96GB 不只是够用，而是 RunPod secure 上唯一有真实供给的档位（48GB 及以下的卡在 21 个
+支持网络卷的 DC 里几乎零库存）。另外查实 **serverless 有约 49% 附加费**，V1 迁到
+按需 Pod 后单价从 `$4.79/h` 降到 `$2.09/h`。
+
+## 主线切换：MiniMax H3 + PinkCherry（2026-09-01 代码已就位，未上机）
+
+用户拍板把主线从 Wan 2.2 换成 MiniMax H3。理由：H3 是 Artificial Analysis 盲评的
+**开源第一**（T2V Elo 1301 无音频 / 1227 有音频，总榜第 4，只输给闭源的 Wan 3.0 和
+Seedance 2.0），原生 32kHz 立体声一次出片，而且 V1 用的 PinkCherry 的作者
+（`SexGod1979`）已经把整套 NSFW 微调迁到了 H3。
+
+- 新 Worker：`workers/minimax-h3/`，SGLang Diffusion 原生 `DiffGenerator`，
+  **不依赖 ComfyUI**、不起 server、**没有第二个音频模型**（AudioLDM2 那一段整段删掉）。
+- 基座 `MiniMaxAI/MiniMax-H3` FL2VA 分区 + PinkCherry beta-0.6 完整微调 DiT
+  （经单文件 `transformer_weights_path` 覆盖）+ lightx2v 8 步蒸馏 LoRA。
+- PinkCherry 的可加载性是**读 safetensors 头部验证过的**：535 个张量，名称/形状与官方
+  FL2VA transformer 逐项一致。仓库里的 `int8_convrot` 变体是 ComfyUI 量化，不可用。
+- 控制面：新 provider `runpod_h3_pod`，与 Wan 共用一次性 Pod 契约（价格上限、
+  30 分钟超时、终态回调删 Pod、进度回调）。UI 选项由 `H3_ENABLED` 开关控制，默认关。
+- 卷：默认 145.4GB（跳过被 PinkCherry 替换掉的 66.28GB 官方分片），建议 170GB 单卷。
+
+**还没上过机**。首轮要花钱确认的 5 件事写在 `workers/minimax-h3/README.md` 末尾，
+最关键的是峰值显存、单次耗时、在线 FP8 之后 merge LoRA 是否正确。
 
 ## 下一步建议
 
-1. 用户人工验收两个视频（`/generate` 任务列表即可播放/下载；LTX one-shot 的视频不在
-   任务 DB，仅在卷上：`d5ce95fd-c283-41ee-a7eb-248ccdabeeef.mp4`）。
-2. 启动 `video-pipeline-v2.md` 的固定 A/B 矩阵（6–10 提示词 × 3 seed，人工盲评）。
-3. 可选改进：Wan handler 拆分模型加载与纯推理计时；LTX one-shot 增加回调以纳入任务 DB。
+1. 建 H3 的 170GB 网络卷（建议 US-NC-2，当前 RTX PRO 6000 secure 库存最好）+ 一次性
+   模板，跑 `download_models.sh`，然后单 Pod 冒烟 1 次确认能出片。
+2. 用实测填 `H3_SECONDS_PER_MPIXEL_STEP`，把 30 分钟超时守卫打开——Wan 就是栽在
+   没有这个守卫上（720p/12s 必超时，计费后才失败）。
+3. H3 vs LTX 2.3 的人工盲评（H3 通过后再谈把 Wan 下线）。
+4. V1 LTX 从 serverless 迁到按需 Pod（省 56% 单价，且不再交 serverless 附加费）。
 
 不要把 RunPod API key、GitHub PAT、Railway 管理员密码或上传 token 写入本文件或命令输出。

@@ -557,3 +557,104 @@ def test_completed_task_accepts_quality_vote(tmp_path: Path) -> None:
         )
     assert response.status_code == 200
     assert response.json()["task"]["quality_vote"] == 1
+
+
+def test_h3_pod_callback_commits_result_and_deletes_billed_pod(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The H3 main line shares the one-shot Pod contract, including deletion."""
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    store.create(
+        {
+            "id": "local-h3",
+            "provider": "runpod_h3_pod",
+            "provider_task_id": "pod-h3-1",
+            "prompt": "测试",
+            "model": "minimax-h3-pinkcherry",
+            "ratio": "16:9",
+            "resolution": "768p",
+            "duration": 5,
+            "has_reference": 0,
+            "status": "processing",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    deleted: list[str] = []
+
+    class FakePodClient:
+        def delete_pod(self, pod_id: str):
+            deleted.append(pod_id)
+
+    def fake_pod_client():
+        yield FakePodClient()
+
+    monkeypatch.setattr(web, "_h3_pod_client", fake_pod_client)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        progress = client.post(
+            "/generate/api/internal/pod-progress/local-h3",
+            headers={"Authorization": "Bearer callback-token"},
+            json={"stage": "model_load_done", "seconds": 131.5},
+        )
+        assert progress.status_code == 200
+        response = client.post(
+            "/generate/api/internal/pod-result/local-h3",
+            headers={"Authorization": "Bearer callback-token"},
+            json={
+                "status": "succeeded",
+                "content": {
+                    "video_url": "/generate/media/h3.mp4",
+                    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                    "peak_memory_mb": 61234,
+                    "has_audio": True,
+                    "audio_sample_rate": 32000,
+                },
+                "error": None,
+            },
+        )
+    assert response.status_code == 200
+    task = store.get("local-h3")
+    assert task and task["status"] == "succeeded"
+    assert task["video_url"] == "/generate/media/h3.mp4"
+    # H3 produces its soundtrack in the same pass, so the metadata proves the
+    # lane never needed a second audio model.
+    assert task["provider_metadata"]["audio_sample_rate"] == 32000
+    assert task["provider_metadata"]["peak_memory_mb"] == 61234
+    assert deleted == ["pod-h3-1"]
+
+
+def test_h3_lane_is_flag_gated_and_owns_768p(tmp_path: Path) -> None:
+    settings = web_settings(tmp_path)
+    assert settings.h3_enabled is False
+    app = create_app(settings)
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        blocked = client.post(
+            "/generate/api/tasks",
+            data={
+                "prompt": "cinematic wide shot of a sunrise",
+                "model": "minimax-h3-pinkcherry",
+                "ratio": "16:9",
+                "resolution": "768p",
+                "duration": 5,
+            },
+        )
+        assert blocked.status_code == 503
+        # 768 is H3's short edge; no other lane resolves a canvas from it.
+        wrong_lane = client.post(
+            "/generate/api/tasks",
+            data={
+                "prompt": "cinematic wide shot of a sunrise",
+                "model": "seedance-2.0",
+                "ratio": "16:9",
+                "resolution": "768p",
+                "duration": 5,
+            },
+        )
+        assert wrong_lane.status_code == 422
+        page = client.get("/generate")
+        assert 'value="minimax-h3-pinkcherry" disabled' in page.text

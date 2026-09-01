@@ -259,7 +259,7 @@ class RunPodPodClient:
         progress_url = ""
         if "/pod-result" in callback_url:
             progress_url = callback_url.replace("/pod-result", "/pod-progress")
-        smoke_input = {
+        smoke_input: dict[str, Any] = {
             "prompt": prompt.strip(),
             "model_id": self.settings.model_id,
             "model_version": self.settings.model_version,
@@ -268,10 +268,18 @@ class RunPodPodClient:
             "resolution": options.get("resolution", "480p"),
             "duration": options.get("duration", 5),
             "generate_audio": options.get("generate_audio", True),
-            "adult_adapter_id": self.settings.adult_adapter_id,
-            "adult_adapter_version": self.settings.adult_adapter_version,
-            "adult_adapter_strength": self.settings.adult_adapter_strength,
         }
+        # Each lane pins its adult layer with exactly one of these shapes, and
+        # the Worker rejects the job when the submitted pin disagrees with the
+        # weights it actually loaded. Wan adapts a base model with a LoRA; H3
+        # swaps the whole transformer for a fine-tuned checkpoint.
+        if self.settings.adult_adapter_id:
+            smoke_input["adult_adapter_id"] = self.settings.adult_adapter_id
+            smoke_input["adult_adapter_version"] = self.settings.adult_adapter_version
+            smoke_input["adult_adapter_strength"] = self.settings.adult_adapter_strength
+        if self.settings.adult_model_id:
+            smoke_input["adult_model_id"] = self.settings.adult_model_id
+            smoke_input["adult_model_version"] = self.settings.adult_model_version
         template = self._request("GET", f"/templates/{self.settings.template_id}")
         template_env = template.get("env") if isinstance(template.get("env"), dict) else {}
         pod_env = {
@@ -285,7 +293,7 @@ class RunPodPodClient:
         if self.settings.use_management_api_v1:
             # rp-migrate: keep-v1 start
             payload = {  # rp-migrate: keep-v1
-                "name": f"papa-wan-{task_id[:12]}",
+                "name": f"{self.settings.name_prefix}-{task_id[:12]}",
                 "templateId": self.settings.template_id,
                 "cloudType": "SECURE",
                 "computeType": "GPU",
@@ -303,7 +311,7 @@ class RunPodPodClient:
         else:
             # rp-migrate: ignore start
             payload = {
-                "name": f"papa-wan-{task_id[:12]}",
+                "name": f"{self.settings.name_prefix}-{task_id[:12]}",
                 "templateId": self.settings.template_id,
                 "cloud": "SECURE",
                 "gpu": {

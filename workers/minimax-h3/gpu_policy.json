@@ -1,0 +1,31 @@
+{
+  "policy_version": 1,
+  "comparison_group": "h3-main-line",
+  "minimum_vram_gb": 96,
+  "minimum_compute_capability": "12.0",
+  "maximum_secure_price_usd_per_hour": 3.0,
+  "maximum_serverless_price_usd_per_hour": 3.0,
+  "allow_fallback_gpu_types": true,
+  "observed_serverless_price_usd_per_hour": 3.49,
+  "serverless_provisioning_blocked": true,
+  "pricing_note": "Secure on-demand Pods only. Prices are the RunPod secure rates observed on 2026-08-31 via /v2/catalog/gpus; the $1.69 figure in older notes was the community rate, and pods here request cloud=SECURE. Serverless for this pool is $3.49/h plus a ~49% platform fee measured on the August 2026 invoice, so it stays blocked by the $3/h cap.",
+  "selection_note": "Both entries are the same BLACKWELL_96 pool: SM 12.0, 96 GB, one architecture, one image. Listing the Workstation Edition as a sibling widens supply for free -- it is cheaper than the Server Edition and needs no rebuild. Sub-96 GB cards are excluded on capability, not preference: online FP8 and NVFP4 need SM >= 8.9 (so A100/SM80 is out), the SageAttention kernels in this image are compiled for SM 12.0 only (so H100/H200/B200 would need a rebuild), and RunPod secure stock for 32-48 GB cards was zero across all 21 storage-capable North American data centers when this lane was specified.",
+  "gpu_types": [
+    {
+      "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "vram_gb": 96,
+      "compute_capability": "12.0",
+      "secure_price_usd_per_hour": 2.09,
+      "quantization": "sglang-online-fp8",
+      "priority": 1
+    },
+    {
+      "id": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "vram_gb": 96,
+      "compute_capability": "12.0",
+      "secure_price_usd_per_hour": 1.89,
+      "quantization": "sglang-online-fp8",
+      "priority": 2
+    }
+  ]
+}

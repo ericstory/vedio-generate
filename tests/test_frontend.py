@@ -32,6 +32,7 @@ def test_frontend_exposes_all_supported_models() -> None:
     assert 'select name="model" id="model"' in markup
     assert 'type="hidden" name="model"' not in markup
     for model in (
+        "minimax-h3-pinkcherry",
         "wan-2.2-a14b-adult-v2",
         "pinkcherry-ltx-2.3-v1.8",
         "seedance-2.5",

@@ -86,9 +86,15 @@ class RunPodPodSettings:
     model_version: str = "2c5a06469cd2255816eb2e46b8e11600ed435d52"
     workflow_version: str = "wan22-t2v-fp8-resident96-adult-lora-audio-v5"
     ui_model_id: str = "wan-2.2-a14b-adult-v2"
+    name_prefix: str = "papa-wan"
     adult_adapter_id: str = "lopi999/Wan2.2-I2V_General-NSFW-LoRA"
     adult_adapter_version: str = "aeef17d7fa51d753ab7d1004ddb4f218a95d756d"
     adult_adapter_strength: float = 0.9
+    # H3's NSFW layer is a full fine-tuned checkpoint rather than an adapter, so
+    # it pins a model id/revision instead of an adapter id/revision/strength.
+    # Each lane sets exactly one of the two pairs.
+    adult_model_id: str = ""
+    adult_model_version: str = ""
 
 
 def load_settings(env_file: str | Path | None = None) -> Settings:
@@ -169,33 +175,38 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
     )
 
 
+def _parse_region_volumes(env_name: str) -> tuple[tuple[str, str], ...]:
+    """Decode the optional extra (data centre, network volume) Pod lanes."""
+    raw_region_volumes = os.getenv(env_name, "").strip()
+    if not raw_region_volumes:
+        return ()
+    try:
+        decoded_region_volumes = json.loads(raw_region_volumes)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{env_name} must be valid JSON") from exc
+    if not isinstance(decoded_region_volumes, list):
+        raise ValueError(f"{env_name} must be a JSON list")
+    lanes: list[tuple[str, str]] = []
+    for lane in decoded_region_volumes:
+        if not isinstance(lane, dict):
+            raise ValueError(f"Every {env_name} lane must be a JSON object")
+        data_center_id = str(lane.get("data_center_id") or "").strip()
+        network_volume_id = str(lane.get("network_volume_id") or "").strip()
+        if not data_center_id or not network_volume_id:
+            raise ValueError(
+                f"Every {env_name} lane requires data_center_id and network_volume_id"
+            )
+        lanes.append((data_center_id, network_volume_id))
+    return tuple(lanes)
+
+
 def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
     """Load the price-capped, exact-GPU Wan Pod lane."""
     _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
     use_management_api_v1 = os.getenv("RUNPOD_API_V1", "0") == "1"
-    additional_region_volumes: list[tuple[str, str]] = []
-    raw_region_volumes = os.getenv("RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES", "").strip()
-    if raw_region_volumes:
-        try:
-            decoded_region_volumes = json.loads(raw_region_volumes)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES must be valid JSON"
-            ) from exc
-        if not isinstance(decoded_region_volumes, list):
-            raise ValueError(
-                "RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES must be a JSON list"
-            )
-        for lane in decoded_region_volumes:
-            if not isinstance(lane, dict):
-                raise ValueError("Every additional Wan Pod lane must be a JSON object")
-            data_center_id = str(lane.get("data_center_id") or "").strip()
-            network_volume_id = str(lane.get("network_volume_id") or "").strip()
-            if not data_center_id or not network_volume_id:
-                raise ValueError(
-                    "Every additional Wan Pod lane requires data_center_id and network_volume_id"
-                )
-            additional_region_volumes.append((data_center_id, network_volume_id))
+    additional_region_volumes = _parse_region_volumes(
+        "RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES"
+    )
     return RunPodPodSettings(
         api_key=_required("RUNPOD_API_KEY"),
         template_id=_required("RUNPOD_WAN_POD_TEMPLATE_ID"),
@@ -239,4 +250,63 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
             "WAN_ADULT_ADAPTER_VERSION", "aeef17d7fa51d753ab7d1004ddb4f218a95d756d"
         ),
         adult_adapter_strength=float(os.getenv("WAN_ADULT_ADAPTER_STRENGTH", "0.9")),
+    )
+
+
+def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
+    """Load the MiniMax H3 main line: same price-capped, exact-GPU Pod shape."""
+    _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    use_management_api_v1 = os.getenv("RUNPOD_API_V1", "0") == "1"
+    return RunPodPodSettings(
+        api_key=_required("RUNPOD_API_KEY"),
+        template_id=_required("RUNPOD_H3_POD_TEMPLATE_ID"),
+        network_volume_id=_required("RUNPOD_H3_POD_NETWORK_VOLUME_ID"),
+        callback_url=_required("RUNPOD_H3_POD_CALLBACK_URL"),
+        callback_token=_required("VIDEO_UPLOAD_TOKEN"),
+        api_base_url=os.getenv(
+            "RUNPOD_MANAGEMENT_API_BASE_URL",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",  # rp-migrate: keep-v1
+        ).rstrip("/"),
+        use_management_api_v1=use_management_api_v1,
+        gpu_id=os.getenv(
+            "RUNPOD_H3_POD_GPU_ID",
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        ),
+        # US-NC-2 held the best RTX PRO 6000 secure stock across repeated
+        # sampling on 2026-08-31; US-KS-2 was the weakest of the three lanes we
+        # own volumes in, which is why it is no longer a primary.
+        data_center_id=os.getenv("RUNPOD_H3_POD_DATA_CENTER_ID", "US-NC-2"),
+        fallback_data_center_id=os.getenv("RUNPOD_H3_POD_FALLBACK_DATA_CENTER_ID", ""),
+        fallback_network_volume_id=os.getenv(
+            "RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID", ""
+        ),
+        additional_region_volumes=_parse_region_volumes(
+            "RUNPOD_H3_POD_ADDITIONAL_REGION_VOLUMES"
+        ),
+        maximum_price_per_hour=float(
+            os.getenv("RUNPOD_H3_POD_MAX_PRICE_PER_HOUR", "3.0")
+        ),
+        maximum_runtime_seconds=int(
+            os.getenv("RUNPOD_H3_POD_MAX_RUNTIME_SECONDS", "1800")
+        ),
+        model_id=os.getenv("H3_MODEL_ID", "MiniMaxAI/MiniMax-H3"),
+        model_version=os.getenv(
+            "H3_MODEL_VERSION", "42ed227ee7df40d41602854ae760620d6eb651fe"
+        ),
+        workflow_version=os.getenv(
+            "H3_WORKFLOW_VERSION", "h3-fl2va-pinkcherry-turbo8-v1"
+        ),
+        ui_model_id="minimax-h3-pinkcherry",
+        name_prefix="papa-h3",
+        # H3's NSFW layer replaces the transformer instead of adapting it, so
+        # the adapter triple stays empty and the checkpoint pair carries it.
+        adult_adapter_id="",
+        adult_adapter_version="",
+        adult_adapter_strength=1.0,
+        adult_model_id=os.getenv(
+            "H3_NSFW_MODEL_ID", "SexGod1979/PinkCherry_MiniMax-H3"
+        ),
+        adult_model_version=os.getenv(
+            "H3_NSFW_MODEL_VERSION", "bf2fef11d0e55e957f4af997e3beade3362f44b3"
+        ),
     )
