@@ -340,7 +340,18 @@ class RunPodPodClient:
         pod: dict[str, Any] | None = None
         selected_data_center = ""
         last_capacity_error: RunPodError | None = None
-        for data_center_id, network_volume_id in lanes:
+        # Exact-GPU secure stock is thin enough that one sweep over the lanes
+        # regularly loses the race even when every lane reports stock. A capacity
+        # rejection creates no Pod and bills nothing, so a few more sweeps are
+        # free; they just cost the caller a little latency.
+        attempts = [
+            (dc, vol)
+            for _ in range(max(1, self.settings.capacity_retry_sweeps))
+            for dc, vol in lanes
+        ]
+        for index, (data_center_id, network_volume_id) in enumerate(attempts):
+            if index and index % len(lanes) == 0:
+                sleep(self.settings.capacity_retry_delay_seconds)
             lane_payload = {
                 **payload,
                 "dataCenterIds": [data_center_id],

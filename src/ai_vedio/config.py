@@ -80,6 +80,9 @@ class RunPodPodSettings:
     fallback_network_volume_id: str = ""
     additional_region_volumes: tuple[tuple[str, str], ...] = ()
     volume_mount_path: str = "/runpod-volume"
+    # How many times to sweep the whole lane list before giving up on capacity.
+    capacity_retry_sweeps: int = 3
+    capacity_retry_delay_seconds: float = 5.0
     maximum_price_per_hour: float = 3.0
     maximum_runtime_seconds: int = 1800
     model_id: str = "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"

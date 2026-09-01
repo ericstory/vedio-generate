@@ -302,6 +302,20 @@ def _generation_error(exc: SeedanceError) -> JSONResponse:
             "图片需小于 30MB，宽高均为 300–6000px",
             "图片宽高比需处于 0.4–2.5 之间",
         ]
+    elif any(
+        term in searchable
+        for term in ("no instances currently available", "no longer any instances available")
+    ):
+        # A capacity miss is not a content decision, and saying so sends people
+        # off editing a prompt that was never the problem. No Pod is created and
+        # nothing is billed when this happens.
+        detail = "云 GPU 当前无可用机器"
+        guidance = [
+            "这与提示词无关：所选 GPU 型号在配置的数据中心暂时没有空闲机器",
+            "等待 1–2 分钟后重试，容量通常很快回来",
+            "本次未创建 Pod，不产生任何费用",
+        ]
+        status_code = 503
     elif exc.status_code == 429 or any(term in searchable for term in ("rate", "burst", "overload", "concurrency")):
         detail = "生成服务当前繁忙"
         guidance = ["等待 30–60 秒后重试", "避免连续点击提交", "如持续发生，请检查模型端点配额"]

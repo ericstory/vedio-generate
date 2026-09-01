@@ -377,3 +377,94 @@ def test_wan_pod_retries_each_pinned_region_volume_on_capacity_error() -> None:
     assert posted[2]["dataCenterIds"] == ["US-NC-2"]
     assert posted[2]["mounts"]["network"][0]["volumeId"] == "nc2-volume"
     client.close()
+
+
+def _capacity_error():
+    """Build the error exactly as RunPodPodClient._request does for a RunPod 400.
+
+    RunPod returns {"detail": ..., "status": ..., "title": ...} with no "error"
+    key, so the whole body becomes the error payload and the phrase only shows up
+    in the formatted message, which is what upstream_message falls back to.
+    """
+    from ai_vedio.runpod import RunPodError
+
+    body = {
+        "detail": "There are no longer any instances available with the requested specifications. Please refresh and try again.",
+        "status": 400,
+        "title": "Bad Request",
+    }
+    return RunPodError(
+        f"RunPod Pod API HTTP 400: {body}", status_code=400, error=body
+    )
+
+
+def test_pod_capacity_misses_sweep_the_lanes_more_than_once(monkeypatch) -> None:
+    """A capacity rejection creates no Pod, so retrying costs nothing but latency."""
+    from ai_vedio.config import RunPodPodSettings
+    from ai_vedio.runpod import RunPodError, RunPodPodClient
+
+    settings = RunPodPodSettings(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="vol-primary",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        data_center_id="US-NC-2",
+        fallback_data_center_id="US-KS-2",
+        fallback_network_volume_id="vol-fallback",
+        capacity_retry_sweeps=3,
+        capacity_retry_delay_seconds=0,
+        ui_model_id="minimax-h3-pinkcherry",
+    )
+    client = RunPodPodClient(settings)
+    seen: list[str] = []
+
+    def fake_request(method, path, **kwargs):
+        if method == "GET":
+            return {"env": {}}
+        seen.append(kwargs["json"]["dataCenterIds"][0])
+        # Free capacity only on the very last attempt of the third sweep.
+        if len(seen) < 6:
+            raise _capacity_error()
+        return {"id": "pod-ok", "cost": 2.09, "gpu": {"id": settings.gpu_id}}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    result = client.create_text_video(
+        prompt="cinematic wide shot", model="minimax-h3-pinkcherry", task_id="task-1"
+    )
+    assert result["id"] == "pod-ok"
+    # Three full sweeps over both lanes, in order, rather than one and give up.
+    assert seen == ["US-NC-2", "US-KS-2"] * 3
+    client.close()
+
+
+def test_pod_capacity_exhaustion_still_raises_the_upstream_error(monkeypatch) -> None:
+    from ai_vedio.config import RunPodPodSettings
+    from ai_vedio.runpod import RunPodError, RunPodPodClient
+
+    settings = RunPodPodSettings(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="vol",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        capacity_retry_sweeps=2,
+        capacity_retry_delay_seconds=0,
+        ui_model_id="minimax-h3-pinkcherry",
+    )
+    client = RunPodPodClient(settings)
+    calls = []
+
+    def fake_request(method, path, **kwargs):
+        if method == "GET":
+            return {"env": {}}
+        calls.append(1)
+        raise _capacity_error()
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    with pytest.raises(RunPodError):
+        client.create_text_video(
+            prompt="cinematic wide shot", model="minimax-h3-pinkcherry", task_id="task-1"
+        )
+    assert len(calls) == 2
+    client.close()
