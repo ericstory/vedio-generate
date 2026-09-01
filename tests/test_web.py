@@ -239,6 +239,34 @@ def test_wan_pod_progress_ignores_terminal_tasks(tmp_path: Path) -> None:
     assert task and "progress" not in (task.get("provider_metadata") or {})
 
 
+def test_wan_720p_duration_cap_rejected_before_provider(tmp_path: Path, monkeypatch) -> None:
+    settings = replace(web_settings(tmp_path), wan_v2_enabled=True)
+    app = create_app(settings)
+
+    def explode(*args, **kwargs):
+        raise AssertionError("provider must not be called for an over-budget combo")
+
+    monkeypatch.setattr(web, "_provider_client", explode)
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": settings.username, "password": settings.password},
+        )
+        response = client.post(
+            "/generate/api/tasks",
+            data={
+                "prompt": "海边日出",
+                "model": "wan-2.2-a14b-adult-v2",
+                "ratio": "16:9",
+                "resolution": "720p",
+                "duration": "12",
+                "generate_audio": "true",
+            },
+        )
+    assert response.status_code == 422
+    assert "10 秒" in response.json()["detail"]
+
+
 def test_task_store_orders_newest_first(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "tasks.db")
     base = {

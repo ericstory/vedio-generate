@@ -48,8 +48,10 @@ V1（PinkCherry LTX 2.3）与 V2（Wan 2.2 A14B FP8 + 成人 LoRA + AudioLDM2）
 - Wan 现为 4 步蒸馏 fast profile：模板 adapter 指向 `fused-lora/{high,low}_adult_lightning_v1.safetensors`
   （成人+Lightning 离线融合单 adapter，dynamic 模式），steps=4、CFG 1.0/1.0、flow_shift=5.0、
   workflow `…lightning4fused…-v7`，镜像 `d7cd5ba1…`。
-- 实测：480p/4s 端到端 4 分 44 秒；**720p/12s 端到端 6 分 52 秒**（峰值 91.3GB，
-  已近 96GB 上限，720p/15s 勿放开）。画质待用户盲评，回切 40 步质量档只需还原模板 env。
+- 实测：480p/4s 端到端 4 分 44 秒；720p/10s 端到端 ~7 分钟。
+- **⚠️ 720p/12s 输出为全黑**（sglang FFN int32 索引溢出，tokens>155k 触发；隔离矩阵见
+  ab 文档）。已在 worker（token 预算校验）与 web（提交拦截）双层封锁：**Wan 720p
+  上限 10 秒**；12–15 秒长片走 LTX。画质待用户盲评，回切 40 步质量档只需还原模板 env。
 - sglang v0.5.16 两个已确认限制（勿踩）：dynamic 每 target 单 adapter；merge 模式对
   modelopt-FP8 有维度 bug。
 - Railway Wan 通道当前主/兜底均为 **US-NC-2**（`nv7g5aobqn`），KS2 融合文件补齐后应恢复

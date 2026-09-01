@@ -19,7 +19,14 @@ from diffusers import AudioLDM2Pipeline
 from scipy.io import wavfile
 from sglang.multimodal_gen import DiffGenerator
 
-from worker_config import FPS, dimensions, ensure_trigger, frames_for_duration, validate_prompt
+from worker_config import (
+    FPS,
+    dimensions,
+    ensure_trigger,
+    frames_for_duration,
+    validate_prompt,
+    validate_token_budget,
+)
 
 
 MODEL_ROOT = Path(
@@ -308,6 +315,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     num_frames = frames_for_duration(duration)
     resolution = str(params.get("resolution") or "480p")
     width, height = dimensions(str(params.get("ratio") or "16:9"), resolution)
+    validate_token_budget(width, height, num_frames)
     generate_audio = bool(params.get("generate_audio", True))
     seed = int(params.get("seed", -1))
     if seed < 0:

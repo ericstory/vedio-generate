@@ -71,5 +71,29 @@ def frames_for_duration(duration: int) -> int:
     return duration * FPS + 1
 
 
+# An SGLang kernel indexes the FFN intermediate (tokens x 13824) with int32.
+# Past ~155k latent tokens (2^31 / 13824) it overflows and every frame decodes
+# to black, so jobs are rejected before any GPU time is billed. Verified pairs:
+# 720p/10s (147.6k) renders, 720p/12s (176.4k) is black on every backend.
+MAX_LATENT_TOKENS = 150_000
+VAE_TEMPORAL_STRIDE = 4
+LATENT_PATCH = 16
+
+
+def latent_tokens(width: int, height: int, num_frames: int) -> int:
+    latent_frames = (num_frames - 1) // VAE_TEMPORAL_STRIDE + 1
+    return latent_frames * (width // LATENT_PATCH) * (height // LATENT_PATCH)
+
+
+def validate_token_budget(width: int, height: int, num_frames: int) -> None:
+    tokens = latent_tokens(width, height, num_frames)
+    if tokens > MAX_LATENT_TOKENS:
+        raise ValueError(
+            f"Wan V2 latent token budget exceeded: {tokens} > {MAX_LATENT_TOKENS} "
+            f"({width}x{height}, {num_frames} frames). Reduce duration or "
+            "resolution; 720p supports at most 10 seconds."
+        )
+
+
 def ensure_trigger(prompt: str, trigger: str = "nsfwsks") -> str:
     return prompt if trigger.lower() in prompt.lower() else f"{trigger}, {prompt}"

@@ -763,6 +763,13 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 raise HTTPException(status_code=503, detail="Wan V2 尚未启用")
             if reference and reference.filename:
                 raise HTTPException(status_code=422, detail="Wan V2 文生视频首版暂不接收参考图")
+            # Beyond ~150k latent tokens an SGLang kernel overflows int32 and
+            # renders pure black; 720p crosses that budget after 10 seconds.
+            if resolution == "720p" and duration > 10:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Wan 720p 最长支持 10 秒：更长时长请改用 480p 或 LTX 模型",
+                )
         image_data_url = None
         if reference and reference.filename:
             if reference.content_type not in ALLOWED_IMAGE_TYPES:

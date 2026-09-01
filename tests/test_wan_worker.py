@@ -47,6 +47,19 @@ def test_wan_prompt_policy_rejects_disallowed_combinations() -> None:
         config.validate_prompt("non-consensual scene")
 
 
+def test_wan_token_budget_blocks_int32_overflow_combinations() -> None:
+    config = load_worker_config()
+    # 720p/12s (176k tokens) crossed the int32 FFN indexing limit and rendered
+    # black on every attention backend; 720p/10s and all 480p durations render.
+    with pytest.raises(ValueError):
+        config.validate_token_budget(1280, 720, 12 * 16 + 1)
+    config.validate_token_budget(1280, 720, 10 * 16 + 1)
+    config.validate_token_budget(832, 480, 15 * 16 + 1)
+    assert config.latent_tokens(1280, 720, 193) > config.MAX_LATENT_TOKENS
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert "validate_token_budget(width, height, num_frames)" in source
+
+
 def test_wan_handler_forces_both_denoiser_adapters() -> None:
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert "DiffGenerator.from_pretrained" in source
