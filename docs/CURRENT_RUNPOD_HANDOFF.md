@@ -101,6 +101,31 @@ Seedance 2.0），原生 32kHz 立体声一次出片，而且 V1 用的 PinkCher
 **还没上过机**。首轮要花钱确认的 5 件事写在 `workers/minimax-h3/README.md` 末尾，
 最关键的是峰值显存、单次耗时、在线 FP8 之后 merge LoRA 是否正确。
 
+### H3 资源清单（2026-09-01 建，方案 B）
+
+| 资源 | ID | 说明 |
+| --- | --- | --- |
+| 卷（主） | `n7meo4oft2` | US-NC-2，170GB，已灌满 |
+| 卷（备） | `qextiwmyla` | US-KS-2，170GB，已灌满 |
+| 镜像 | `ghcr.io/ericstory/papa-minimax-h3:<sha>` | GHCR，registry 凭据 `cmtgxws1c003d14njrtc07zd2` |
+| 模板 | 见 Railway `RUNPOD_H3_POD_TEMPLATE_ID` | `args={"cmd":["python","/app/smoke.py"]}` |
+
+两卷内容实测一致：`145,443,261,098` / `145,443,261,107` 字节，与 `models.lock.json` 的
+`expected_download_bytes`（145,443,193,257）差约 68KB，即 HF 的 `.cache` 元数据。
+
+下载用 **CPU pod**（`python:3.12-slim` + 公开仓库里的 `download_models.sh`），不是 GPU pod：
+145GB 约 5 分钟下完，单价 `$0.03/vCPU/h`，就算守护失效跑一整天也只有几美元，而 GPU pod
+同样的疏忽是 `$50/天`。KS-2 首次申请 8 vCPU 直接返回"无实例可用"，降到 4 vCPU 才建上——
+下载这种可重试的活儿不该占 GPU 配额。
+
+### 存储成本的实际口径（更正）
+
+`/v2/billing` 窗口总额会低估：卷是月底才建的，只计了几天。按最后一个完整日算 run rate：
+2026-08-31 是 `$1.42/天 ≈ $43/月`（660GB）。加上 H3 两个 170GB 卷后约 **$70/月**。
+H3 冒烟通过后按方案 B 清理：删 Wan BF16 遗留卷 `p7dkzdmomf`（NE-1 150GB）、3 个 Wan FP8
+卷（210GB）、LTX 冗余卷，目标回到约 `$28/月`。**LTX 的 NE-1 卷 `fn6at7unxa` 不能删**——
+V1 生产 serverless endpoint `aoma1602mogius` 还挂着它，要等 V1 迁到 Pod 链路之后。
+
 ## 下一步建议
 
 1. 建 H3 的 170GB 网络卷（建议 US-NC-2，当前 RTX PRO 6000 secure 库存最好）+ 一次性
