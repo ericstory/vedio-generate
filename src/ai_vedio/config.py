@@ -75,6 +75,9 @@ class RunPodPodSettings:
     api_base_url: str = "https://api.runpod.io/v2"
     use_management_api_v1: bool = False
     gpu_id: str = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    # Tried in order after gpu_id when it has no capacity. Every entry must be a
+    # card the worker image can actually run on.
+    additional_gpu_ids: tuple[str, ...] = ()
     data_center_id: str = "US-KS-2"
     fallback_data_center_id: str = ""
     fallback_network_volume_id: str = ""
@@ -178,6 +181,15 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
     )
 
 
+def _parse_gpu_ids(env_name: str) -> tuple[str, ...]:
+    """Decode the ordered fallback GPU list (newline- or comma-separated)."""
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return ()
+    parts = [part.strip() for chunk in raw.split("\n") for part in chunk.split(",")]
+    return tuple(part for part in parts if part)
+
+
 def _parse_region_volumes(env_name: str) -> tuple[tuple[str, str], ...]:
     """Decode the optional extra (data centre, network volume) Pod lanes."""
     raw_region_volumes = os.getenv(env_name, "").strip()
@@ -275,6 +287,7 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
             "RUNPOD_H3_POD_GPU_ID",
             "NVIDIA RTX PRO 6000 Blackwell Server Edition",
         ),
+        additional_gpu_ids=_parse_gpu_ids("RUNPOD_H3_POD_ADDITIONAL_GPU_IDS"),
         # US-NC-2 held the best RTX PRO 6000 secure stock across repeated
         # sampling on 2026-08-31; US-KS-2 was the weakest of the three lanes we
         # own volumes in, which is why it is no longer a primary.

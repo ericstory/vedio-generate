@@ -468,3 +468,90 @@ def test_pod_capacity_exhaustion_still_raises_the_upstream_error(monkeypatch) ->
         )
     assert len(calls) == 2
     client.close()
+
+
+def test_pod_falls_back_across_gpu_models_then_lanes(monkeypatch) -> None:
+    """One sold-out GPU model must not take the whole lane down with it."""
+    from ai_vedio.config import RunPodPodSettings
+    from ai_vedio.runpod import RunPodPodClient
+
+    settings = RunPodPodSettings(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="vol-primary",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        gpu_id="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        additional_gpu_ids=("NVIDIA RTX PRO 5000 Blackwell", "NVIDIA GeForce RTX 5090"),
+        data_center_id="US-NC-2",
+        fallback_data_center_id="US-KS-2",
+        fallback_network_volume_id="vol-fallback",
+        capacity_retry_sweeps=1,
+        capacity_retry_delay_seconds=0,
+        ui_model_id="minimax-h3-pinkcherry",
+    )
+    client = RunPodPodClient(settings)
+    seen: list[tuple[str, str]] = []
+
+    def fake_request(method, path, **kwargs):
+        if method == "GET":
+            return {"env": {}}
+        body = kwargs["json"]
+        gpu = body["gpu"]["id"]
+        seen.append((gpu, body["dataCenterIds"][0]))
+        if gpu != "NVIDIA GeForce RTX 5090":
+            raise _capacity_error()
+        return {"id": "pod-5090", "cost": 0.99, "gpu": {"id": gpu}}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    result = client.create_text_video(
+        prompt="cinematic wide shot", model="minimax-h3-pinkcherry", task_id="task-1"
+    )
+    assert result["id"] == "pod-5090"
+    # Preference order is preserved: best card across both lanes before the next.
+    assert seen == [
+        ("NVIDIA RTX PRO 6000 Blackwell Server Edition", "US-NC-2"),
+        ("NVIDIA RTX PRO 6000 Blackwell Server Edition", "US-KS-2"),
+        ("NVIDIA RTX PRO 5000 Blackwell", "US-NC-2"),
+        ("NVIDIA RTX PRO 5000 Blackwell", "US-KS-2"),
+        ("NVIDIA GeForce RTX 5090", "US-NC-2"),
+    ]
+    # The task records the card it actually landed on, not the one asked for.
+    assert result["content"]["gpu_name"] == "NVIDIA GeForce RTX 5090"
+    assert result["content"]["pod_price_per_hour"] == 0.99
+    client.close()
+
+
+def test_pod_rejects_a_gpu_outside_the_candidate_list(monkeypatch) -> None:
+    from ai_vedio.config import RunPodPodSettings
+    from ai_vedio.runpod import RunPodError, RunPodPodClient
+
+    settings = RunPodPodSettings(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="vol",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        gpu_id="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        additional_gpu_ids=("NVIDIA GeForce RTX 5090",),
+        ui_model_id="minimax-h3-pinkcherry",
+    )
+    client = RunPodPodClient(settings)
+    deleted: list[str] = []
+
+    def fake_request(method, path, **kwargs):
+        if method == "GET":
+            return {"env": {}}
+        if method == "DELETE":
+            deleted.append(path.rsplit("/", 1)[-1])
+            return {}
+        return {"id": "pod-x", "cost": 1.19, "gpu": {"id": "NVIDIA A100 80GB PCIe"}}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    with pytest.raises(RunPodError, match="unexpected GPU type"):
+        client.create_text_video(
+            prompt="cinematic wide shot", model="minimax-h3-pinkcherry", task_id="task-1"
+        )
+    # An unlisted card is deleted rather than silently billed and run on.
+    assert deleted == ["pod-x"]
+    client.close()

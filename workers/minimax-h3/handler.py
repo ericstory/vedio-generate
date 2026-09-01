@@ -80,9 +80,6 @@ AUDIO_FLOW_SHIFT = float(os.getenv("H3_AUDIO_FLOW_SHIFT", "3.0"))
 # "lossless" is the pipeline default; "high" enables the audited Cache-DiT
 # profile (1.40x, SSIM 0.931 against lossless on MiniMax's own workload).
 QUALITY = os.getenv("H3_QUALITY", "lossless").strip()
-# H3's DiT is what needs the 96 GB card; the 32B text encoder runs once per
-# request and is cheap to stream from host memory.
-TEXT_ENCODER_CPU_OFFLOAD = os.getenv("H3_TEXT_ENCODER_CPU_OFFLOAD", "1") == "1"
 # No measured H3 timing exists on this GPU yet, so the pod-timeout projection
 # stays disabled until a real run supplies the constant.
 SECONDS_PER_MPIXEL_STEP = float(os.getenv("H3_SECONDS_PER_MPIXEL_STEP", "0"))
@@ -130,8 +127,54 @@ def _require_models() -> None:
         )
 
 
+def residency_profile(total_vram_gb: float) -> dict[str, Any]:
+    """Pick a residency plan for whatever GPU this Pod actually landed on.
+
+    The 96 GB requirement this lane inherited came from Wan, which peaked at
+    91.3 GB. H3 is nowhere near that: MiniMax and SGLang publish single-GPU
+    recipes down to a 24 GB RTX 4090, trading resident weights for layerwise
+    offload. Adapting here is what lets the provider accept a wider GPU list
+    instead of queueing behind one sold-out model.
+
+    The 96 GB plan is the one this repository intends to run and measure. The
+    smaller plans mirror the published SGLang consumer recipes and are not
+    something we have timed ourselves.
+    """
+    if total_vram_gb >= 80:
+        # Resident DiT. The 32B text encoder never fits alongside it in BF16,
+        # so it streams from host memory on every tier.
+        return {
+            "performance_mode": "speed",
+            "dit_cpu_offload": False,
+            "dit_layerwise_offload": False,
+            "text_encoder_cpu_offload": True,
+            "vae_cpu_offload": False,
+        }
+    if total_vram_gb >= 40:
+        # 48 GB class: the quantized DiT fits but leaves little room for 768p
+        # activations, so keep most layers resident and stream the tail.
+        return {
+            "performance_mode": "memory",
+            "layerwise_offload_components": ["dit", "text_encoder"],
+            "dit_offload_prefetch_size": 1,
+            "dit_layerwise_resident_layers": 30,
+            "text_encoder_cpu_offload": True,
+            "vae_cpu_offload": False,
+        }
+    # 32 GB class and below: follow the shape of the published 1x RTX 4090
+    # recipe, with a few more resident layers than a 24 GB card can afford.
+    return {
+        "performance_mode": "memory",
+        "layerwise_offload_components": ["dit", "text_encoder", "vae"],
+        "dit_offload_prefetch_size": 1,
+        "dit_layerwise_resident_layers": 8,
+        "text_encoder_cpu_offload": True,
+        "vae_cpu_offload": True,
+    }
+
+
 def _generator() -> DiffGenerator:
-    """Keep the whole H3 pipeline resident on the 96 GB production GPU."""
+    """Load H3 with a residency plan matched to this Pod's GPU."""
     global _GENERATOR
     if _GENERATOR is None:
         _require_models()
@@ -142,19 +185,31 @@ def _generator() -> DiffGenerator:
             # benchmarking the wrong kernel.
             import sageattention  # noqa: F401
 
+        total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        profile = residency_profile(total_vram_gb)
+        override = os.getenv("H3_PERFORMANCE_MODE", "").strip()
+        if override:
+            profile["performance_mode"] = override
+        print(
+            json.dumps(
+                {
+                    "stage": "residency_profile",
+                    "gpu": torch.cuda.get_device_name(),
+                    "total_vram_gb": round(total_vram_gb, 1),
+                    "profile": {k: v for k, v in profile.items()},
+                }
+            ),
+            flush=True,
+        )
         kwargs: dict[str, Any] = {
             "model_path": str(BASE_MODEL_ROOT),
             "model_variant": MODEL_VARIANT,
             "num_gpus": 1,
-            "performance_mode": "speed",
             "attention_backend": ATTENTION_BACKEND,
-            "dit_cpu_offload": False,
-            "dit_layerwise_offload": False,
-            "text_encoder_cpu_offload": TEXT_ENCODER_CPU_OFFLOAD,
-            "vae_cpu_offload": False,
-            "pin_cpu_memory": TEXT_ENCODER_CPU_OFFLOAD,
+            "pin_cpu_memory": True,
             "enable_torch_compile": False,
             "warmup_mode": "off",
+            **profile,
         }
         if QUANTIZATION:
             kwargs["quantization"] = QUANTIZATION
@@ -364,6 +419,12 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             ),
             "turbo_lora_strength": TURBO_LORA_STRENGTH if TURBO_LORA_ENABLED else None,
             "gpu_name": torch.cuda.get_device_name(),
+            "gpu_total_vram_gb": round(
+                torch.cuda.get_device_properties(0).total_memory / (1024**3), 1
+            ),
+            "performance_mode": residency_profile(
+                torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            )["performance_mode"],
             "engine": "sglang",
             "engine_version": os.getenv("H3_SGLANG_VERSION", "0.5.18"),
             "quantization": QUANTIZATION or "bf16",

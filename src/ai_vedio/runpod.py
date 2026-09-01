@@ -344,18 +344,32 @@ class RunPodPodClient:
         # regularly loses the race even when every lane reports stock. A capacity
         # rejection creates no Pod and bills nothing, so a few more sweeps are
         # free; they just cost the caller a little latency.
+        # Pinning one exact GPU model is what turns a busy hour into an outage:
+        # the RTX PRO 6000 family went unavailable across every data centre,
+        # secure and community alike, while other cards still had capacity.
+        # Candidates are tried in preference order, so the best card still wins
+        # whenever it is there.
+        gpu_candidates = [self.settings.gpu_id, *self.settings.additional_gpu_ids]
         attempts = [
-            (dc, vol)
+            (gpu_id, dc, vol)
             for _ in range(max(1, self.settings.capacity_retry_sweeps))
+            for gpu_id in gpu_candidates
             for dc, vol in lanes
         ]
-        for index, (data_center_id, network_volume_id) in enumerate(attempts):
-            if index and index % len(lanes) == 0:
+        per_sweep = len(gpu_candidates) * len(lanes)
+        for index, (gpu_id, data_center_id, network_volume_id) in enumerate(attempts):
+            if index and index % per_sweep == 0:
                 sleep(self.settings.capacity_retry_delay_seconds)
             lane_payload = {
                 **payload,
                 "dataCenterIds": [data_center_id],
             }
+            if self.settings.use_management_api_v1:
+                # rp-migrate: keep-v1 start
+                lane_payload["gpuTypeIds"] = [gpu_id]  # rp-migrate: keep-v1
+                # rp-migrate: keep-v1 end
+            else:
+                lane_payload["gpu"] = {**payload["gpu"], "id": gpu_id}
             if self.settings.use_management_api_v1:
                 # rp-migrate: keep-v1 start
                 lane_payload["networkVolumeId"] = network_volume_id  # rp-migrate: keep-v1
@@ -412,7 +426,8 @@ class RunPodPodClient:
         else:
             gpu = pod.get("gpu") if isinstance(pod.get("gpu"), dict) else {}
             actual_gpu = str(gpu.get("id") or "")
-        if actual_gpu and actual_gpu != self.settings.gpu_id:
+        allowed_gpus = {self.settings.gpu_id, *self.settings.additional_gpu_ids}
+        if actual_gpu and actual_gpu not in allowed_gpus:
             self.delete_pod(pod_id)
             raise RunPodError(f"RunPod allocated unexpected GPU type: {actual_gpu}")
         return {
@@ -420,7 +435,9 @@ class RunPodPodClient:
             "status": "queued",
             "content": {
                 "video_url": None,
-                "gpu_name": self.settings.gpu_id,
+                # Report what RunPod actually allocated, not what was asked
+                # for: with a candidate list those are no longer the same thing.
+                "gpu_name": actual_gpu or self.settings.gpu_id,
                 "pod_price_per_hour": price,
                 "pod_data_center_id": selected_data_center,
             },

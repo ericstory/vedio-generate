@@ -24,13 +24,20 @@ RUN pip install --break-system-packages --no-cache-dir \
 # SGLang defaults SM12.x (RTX PRO 6000 Blackwell) to plain Torch SDPA because
 # its FlashAttention wheels do not cover that arch. SageAttention 2.2 provides
 # the fast quantized attention path there; PyPI only hosts 1.x, so it builds
-# from the pinned v2.2.0 source with kernels compiled for SM12.0 at image
-# build time — no GPU is needed on the build host. MiniMax measured this
-# backend as the single largest H3 speedup on consumer Blackwell (2.32x over
-# BF16+FA on a 4090), and attention cost grows quadratically with pixels and
-# duration, so it matters more at 768p than it did for Wan at 480p.
+# from the pinned v2.2.0 source at image build time — no GPU is needed on the
+# build host. MiniMax measured this backend as the single largest H3 speedup on
+# consumer Blackwell (2.32x over BF16+FA on a 4090), and attention cost grows
+# quadratically with pixels and duration, so it matters more at 768p than it
+# did for Wan at 480p.
+#
+# Kernels cover four architectures on purpose. A single-arch (12.0) build ties
+# this worker to the RTX PRO 6000 family, and that family went globally
+# unavailable on RunPod — secure and community, every data centre — while every
+# other 96/141/180 GB card still had capacity. Paying build time once buys the
+# scheduler a real choice: 8.9 = L40S / RTX 6000 Ada, 9.0 = H100 / H200,
+# 10.0 = B200, 12.0 = RTX PRO 6000 / 5000 / 4500 and RTX 5090.
 RUN nvcc --version \
-    && TORCH_CUDA_ARCH_LIST="12.0" MAX_JOBS=2 pip install --break-system-packages \
+    && TORCH_CUDA_ARCH_LIST="8.9;9.0;10.0;12.0" MAX_JOBS=2 pip install --break-system-packages \
       --no-cache-dir --no-build-isolation \
       "sageattention @ git+https://github.com/thu-ml/SageAttention.git@eb615cf6cf4d221338033340ee2de1c37fbdba4a" \
     && python -c "import sageattention"

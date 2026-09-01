@@ -1,22 +1,24 @@
 {
-  "policy_version": 1,
+  "policy_version": 2,
   "comparison_group": "h3-main-line",
-  "minimum_vram_gb": 96,
-  "minimum_compute_capability": "12.0",
+  "minimum_vram_gb": 32,
+  "minimum_compute_capability": "8.9",
   "maximum_secure_price_usd_per_hour": 3.0,
   "maximum_serverless_price_usd_per_hour": 3.0,
   "allow_fallback_gpu_types": true,
   "observed_serverless_price_usd_per_hour": 3.49,
   "serverless_provisioning_blocked": true,
-  "pricing_note": "Secure on-demand Pods only. Prices are the RunPod secure rates observed on 2026-08-31 via /v2/catalog/gpus; the $1.69 figure in older notes was the community rate, and pods here request cloud=SECURE. Serverless for this pool is $3.49/h plus a ~49% platform fee measured on the August 2026 invoice, so it stays blocked by the $3/h cap.",
-  "selection_note": "Both entries are the same BLACKWELL_96 pool: SM 12.0, 96 GB, one architecture, one image. Listing the Workstation Edition as a sibling widens supply for free -- it is cheaper than the Server Edition and needs no rebuild. Sub-96 GB cards are excluded on capability, not preference: online FP8 and NVFP4 need SM >= 8.9 (so A100/SM80 is out), the SageAttention kernels in this image are compiled for SM 12.0 only (so H100/H200/B200 would need a rebuild), and RunPod secure stock for 32-48 GB cards was zero across all 21 storage-capable North American data centers when this lane was specified.",
+  "pricing_note": "Secure on-demand Pods only, at the RunPod secure rates read from /v2/catalog/gpus on 2026-08-31. The $1.69 figure in older notes was the community rate; pods here request cloud=SECURE. Serverless for the Blackwell 96 pool is $3.49/h plus a ~49% platform fee measured on the August 2026 invoice, so it stays blocked by the $3/h cap.",
+  "capacity_note": "Policy v1 pinned a single exact model and that turned a busy hour into an outage. On 2026-09-01 the entire RTX PRO 6000 family was unallocatable across every data centre, secure and community, with no network volume and no CUDA floor attached -- while RTX 5090, RTX PRO 4500, L40S, H100 NVL, H200 and B200 all allocated on the first try. GraphQL stockStatus said 'Low' for the RTX PRO 6000 throughout, so it is not a usable signal for whether a Pod can actually be created; only attempting creation is. Capacity rejections create no Pod and bill nothing, so the provider now sweeps this list several times before giving up.",
+  "vram_note": "The 96 GB floor in policy v1 was inherited from Wan, which peaked at 91.3 GB. H3 does not need it: MiniMax and SGLang publish single-GPU recipes down to a 24 GB RTX 4090 using layerwise offload, and the worker now picks a residency plan from the VRAM it actually finds. 96 GB keeps the DiT resident and is still preferred; smaller cards trade speed for availability. The 32B Qwen3-VL text encoder streams from host memory on every tier because it never fits alongside the DiT in BF16.",
+  "architecture_note": "The image builds SageAttention 2.2 for SM 8.9, 9.0, 10.0 and 12.0, so every card below runs the fast attention path without a rebuild. A100 (SM 8.0) is excluded on capability, not preference: online FP8 needs SM >= 8.9. H100 NVL ($3.19), H200 ($4.59) and B200 ($6.79) are excluded by the $3/h cap alone -- the kernels cover them, so raising the cap is the only change they need.",
   "gpu_types": [
     {
       "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
       "vram_gb": 96,
       "compute_capability": "12.0",
       "secure_price_usd_per_hour": 2.09,
-      "quantization": "sglang-online-fp8",
+      "residency": "resident",
       "priority": 1
     },
     {
@@ -24,8 +26,48 @@
       "vram_gb": 96,
       "compute_capability": "12.0",
       "secure_price_usd_per_hour": 1.89,
-      "quantization": "sglang-online-fp8",
+      "residency": "resident",
       "priority": 2
+    },
+    {
+      "id": "NVIDIA RTX PRO 5000 Blackwell",
+      "vram_gb": 48,
+      "compute_capability": "12.0",
+      "secure_price_usd_per_hour": 0.96,
+      "residency": "partial-layerwise-offload",
+      "priority": 3
+    },
+    {
+      "id": "NVIDIA L40S",
+      "vram_gb": 48,
+      "compute_capability": "8.9",
+      "secure_price_usd_per_hour": 0.99,
+      "residency": "partial-layerwise-offload",
+      "priority": 4
+    },
+    {
+      "id": "NVIDIA RTX 6000 Ada Generation",
+      "vram_gb": 48,
+      "compute_capability": "8.9",
+      "secure_price_usd_per_hour": 0.84,
+      "residency": "partial-layerwise-offload",
+      "priority": 5
+    },
+    {
+      "id": "NVIDIA GeForce RTX 5090",
+      "vram_gb": 32,
+      "compute_capability": "12.0",
+      "secure_price_usd_per_hour": 0.99,
+      "residency": "full-layerwise-offload",
+      "priority": 6
+    },
+    {
+      "id": "NVIDIA RTX PRO 4500 Blackwell",
+      "vram_gb": 32,
+      "compute_capability": "12.0",
+      "secure_price_usd_per_hour": 0.72,
+      "residency": "full-layerwise-offload",
+      "priority": 7
     }
   ]
 }

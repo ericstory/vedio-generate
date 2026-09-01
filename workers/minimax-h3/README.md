@@ -26,9 +26,14 @@ PinkCherry 可用性是**验证过的**，不是假设：读取 safetensors 头�
 
 ## 生产规格
 
-- **GPU**：`NVIDIA RTX PRO 6000 Blackwell Server Edition` 96GB Secure Pod，`$2.09/小时`；
-  同池的 Workstation Edition（`$1.89/小时`）作为同架构兄弟卡兜底。SM 12.0 是硬需求：
-  在线 FP8 需要 SM ≥ 8.9，本镜像的 SageAttention kernel 只编译了 SM 12.0。
+- **GPU**：不锁死单一型号。首选 `NVIDIA RTX PRO 6000 Blackwell Server Edition` 96GB
+  Secure Pod（`$2.09/小时`，DiT 常驻最快），缺货时按 `gpu_policy.json` 的优先级依次回退到
+  48GB（PRO 5000 Blackwell / L40S / RTX 6000 Ada）和 32GB（RTX 5090 / PRO 4500）。
+  镜像的 SageAttention 编了 SM 8.9/9.0/10.0/12.0 四个架构，上面每张卡都能走快速注意力路径。
+  A100（SM 8.0）因能力出局：在线 FP8 需要 SM ≥ 8.9。
+  ⚠️ **96GB 不是 H3 的需求**，那是从 Wan（实测峰值 91.3GB）继承来的。H3 在 24GB 的
+  RTX 4090 上都有官方单卡配方。worker 启动时读实际显存自动选常驻档位，见
+  `residency_profile()`。
 - **输出**：4–15 秒、**固定 24fps**、短边 768（唯一被 MiniMax/SGLang 实测过的配置）；
   21:9 / 16:9 / 4:3 / 1:1 / 3:4 / 9:16。H3 按短边和宽高比解析画布，再套 768×1344 面积上限。
 - **音频**：H3 一次前向同时产出视频和 **32kHz 立体声**，直接 mux 成 H.264 + AAC。
@@ -75,7 +80,6 @@ H3_AUDIO_FLOW_SHIFT=3.0
 H3_QUANTIZATION=fp8
 H3_ATTENTION_BACKEND=sage_attn
 H3_QUALITY=lossless
-H3_TEXT_ENCODER_CPU_OFFLOAD=1
 H3_WORKFLOW_VERSION=h3-fl2va-pinkcherry-turbo8-v1
 EAGER_LOAD_MODELS=1
 ```
@@ -88,6 +92,7 @@ EAGER_LOAD_MODELS=1
 | 关掉蒸馏、跑 50 步原生档 | `H3_TURBO_LORA_ENABLED=0` + `H3_INFERENCE_STEPS=50` |
 | 换 4 步激进档 | `H3_TURBO_LORA_PATH=<4step 文件>` + `H3_INFERENCE_STEPS=5` |
 | 在线 FP8 出问题时退回 BF16 | `H3_QUANTIZATION=`（留空） |
+| 强制某个常驻档位（绕过自动判断） | `H3_PERFORMANCE_MODE=speed` 或 `memory` |
 | 开 Cache-DiT 加速档（1.40×，SSIM 0.931） | `H3_QUALITY=high` |
 | LoRA 合并模式出问题 | `H3_LORA_MERGE_MODE=merge` 或 `dynamic` |
 
@@ -98,6 +103,8 @@ RTX PRO 6000 上实跑过**。第一次付费运行要确认：
 
 1. **峰值显存**。第三方数据：8×B300 FP8 每卡 51.9GB；4×H100 TP4 每卡 49.8GB；
    2×RTX 5090 带 layerwise offload 每卡 26.3GiB。单卡 96GB 常驻应该够，但没实测。
+   48GB / 32GB 两个 offload 档位是照 SGLang 官方消费级配方的形状写的，我们没有计过时。
+   结果里会带 `gpu_total_vram_gb` 和 `performance_mode`，实跑一次就知道落在哪档。
 2. **单次耗时**。第三方：RTX 5090 4 步约 19 秒；RTX 4090 24GB 带 offload、
    kitchen_int8 + sage_attn、50 步约 174.9 秒。RTX PRO 6000 无数据。
 3. **在线 FP8 之后再 merge LoRA 是否正确**。Wan 上踩过 merge 模式对预量化

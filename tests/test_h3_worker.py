@@ -151,25 +151,62 @@ def test_h3_handler_uses_native_audio_and_no_comfyui() -> None:
     assert "comfy" not in dockerfile.lower()
 
 
-def test_h3_gpu_policy_allows_only_the_blackwell_96_pool() -> None:
+def test_h3_gpu_policy_spans_every_architecture_the_image_supports() -> None:
     policy = json.loads((WORKER_ROOT / "gpu_policy.json").read_text(encoding="utf-8"))
-    assert policy["minimum_vram_gb"] == 96
-    assert policy["minimum_compute_capability"] == "12.0"
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert policy["maximum_secure_price_usd_per_hour"] == 3.0
     assert policy["serverless_provisioning_blocked"] is True
-    assert policy["observed_serverless_price_usd_per_hour"] > 3.0
-    # Fallback is allowed, but only onto the same architecture: online FP8 needs
-    # SM >= 8.9 and the image's SageAttention kernels are SM 12.0 only.
     assert policy["allow_fallback_gpu_types"] is True
-    assert [gpu["id"] for gpu in policy["gpu_types"]] == [
-        "NVIDIA RTX PRO 6000 Blackwell Server Edition",
-        "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
-    ]
-    assert all(gpu["vram_gb"] == 96 for gpu in policy["gpu_types"])
-    assert all(gpu["compute_capability"] == "12.0" for gpu in policy["gpu_types"])
-    assert all(
-        gpu["secure_price_usd_per_hour"] < 3.0 for gpu in policy["gpu_types"]
+    gpus = policy["gpu_types"]
+    # Preference order must be explicit and dense: the provider walks it in
+    # order, so a gap or a tie would make placement non-deterministic.
+    assert [g["priority"] for g in gpus] == list(range(1, len(gpus) + 1))
+    assert all(g["secure_price_usd_per_hour"] < 3.0 for g in gpus)
+    assert all(g["vram_gb"] >= policy["minimum_vram_gb"] for g in gpus)
+    # Every listed card must have kernels in the image, or the Pod boots into a
+    # silent attention fallback rather than the backend we measured.
+    built = {
+        arch.strip()
+        for arch in dockerfile.split('TORCH_CUDA_ARCH_LIST="')[1].split('"')[0].split(";")
+    }
+    assert built == {"8.9", "9.0", "10.0", "12.0"}
+    assert {g["compute_capability"] for g in gpus} <= built
+    # Online FP8 needs SM >= 8.9, which rules out the A100 generation.
+    assert all(float(g["compute_capability"]) >= 8.9 for g in gpus)
+    assert policy["minimum_vram_gb"] == 32
+
+
+def test_h3_residency_profile_tracks_the_card_it_lands_on() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "h3_handler_probe", WORKER_ROOT / "handler.py"
     )
+    assert spec and spec.loader
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    namespace: dict = {}
+    # Executing the profile function alone avoids importing torch/sglang here.
+    start = source.index("def residency_profile")
+    end = source.index("def _generator")
+    exec("from typing import Any\n" + source[start:end], namespace)
+    profile = namespace["residency_profile"]
+
+    resident = profile(96.0)
+    assert resident["performance_mode"] == "speed"
+    assert resident["dit_layerwise_offload"] is False
+
+    mid = profile(48.0)
+    assert mid["performance_mode"] == "memory"
+    assert mid["layerwise_offload_components"] == ["dit", "text_encoder"]
+
+    small = profile(32.0)
+    assert small["performance_mode"] == "memory"
+    assert small["layerwise_offload_components"] == ["dit", "text_encoder", "vae"]
+    assert small["dit_layerwise_resident_layers"] < mid["dit_layerwise_resident_layers"]
+
+    # The 32B text encoder never fits beside the DiT in BF16, on any tier.
+    for vram in (96.0, 48.0, 32.0, 24.0):
+        assert profile(vram)["text_encoder_cpu_offload"] is True
 
 
 def test_h3_model_lock_pins_loadable_weight_formats() -> None:
