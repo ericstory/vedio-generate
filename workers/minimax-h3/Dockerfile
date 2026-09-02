@@ -33,18 +33,20 @@ RUN pip install --break-system-packages --no-cache-dir \
 # quadratically with pixels and duration, so it matters more at 768p than it
 # did for Wan at 480p.
 #
-# Kernels cover three architectures on purpose. A single-arch (12.0) build ties
-# this worker to the RTX PRO 6000 family, and that family went globally
-# unavailable on RunPod — secure and community, every data centre — while other
-# cards still had capacity. Paying build time once buys the scheduler a real
-# choice: 8.9 = L40S / RTX 6000 Ada, 9.0 = H100 / H200, 12.0 = RTX PRO 6000 /
-# 5000 / 4500 and RTX 5090.
+# SM 12.0 only, which is the one arch list this image has ever built
+# successfully (36.9 minutes, uncached). Widening it to 8.9/9.0 to reach L40S,
+# RTX 6000 Ada, H100 and H200 failed the GitHub-hosted build four times in a row
+# inside 9 minutes, and the cause is not yet diagnosed -- see the handoff notes.
+# Do not widen this again without a build environment whose logs are readable.
 #
-# SM 10.0 (B200) is deliberately absent: SageAttention v2.2.0 pins
-# SUPPORTED_ARCHS = {8.0, 8.6, 8.9, 9.0, 12.0} and raises on anything else, so
-# asking for it fails the build outright. B200 is over the price cap regardless.
+# SM 10.0 (B200) can never go here regardless: SageAttention v2.2.0 pins
+# SUPPORTED_ARCHS = {8.0, 8.6, 8.9, 9.0, 12.0} and raises on anything else.
+#
+# 12.0 still covers RTX PRO 6000 Server/Workstation, RTX PRO 5000, RTX PRO 4500
+# and RTX 5090 -- including both cards that had capacity when the 96 GB family
+# did not.
 RUN nvcc --version \
-    && TORCH_CUDA_ARCH_LIST="8.9;9.0;12.0" MAX_JOBS=2 pip install --break-system-packages \
+    && TORCH_CUDA_ARCH_LIST="12.0" MAX_JOBS=2 pip install --break-system-packages \
       --no-cache-dir --no-build-isolation \
       "sageattention @ git+https://github.com/thu-ml/SageAttention.git@eb615cf6cf4d221338033340ee2de1c37fbdba4a" \
     && python -c "import sageattention"

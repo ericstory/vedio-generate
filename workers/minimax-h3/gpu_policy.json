@@ -1,8 +1,8 @@
 {
-  "policy_version": 2,
+  "policy_version": 3,
   "comparison_group": "h3-main-line",
   "minimum_vram_gb": 32,
-  "minimum_compute_capability": "8.9",
+  "minimum_compute_capability": "12.0",
   "maximum_secure_price_usd_per_hour": 3.0,
   "maximum_serverless_price_usd_per_hour": 3.0,
   "allow_fallback_gpu_types": true,
@@ -11,7 +11,7 @@
   "pricing_note": "Secure on-demand Pods only, at the RunPod secure rates read from /v2/catalog/gpus on 2026-08-31. The $1.69 figure in older notes was the community rate; pods here request cloud=SECURE. Serverless for the Blackwell 96 pool is $3.49/h plus a ~49% platform fee measured on the August 2026 invoice, so it stays blocked by the $3/h cap.",
   "capacity_note": "Policy v1 pinned a single exact model and that turned a busy hour into an outage. On 2026-09-01 the entire RTX PRO 6000 family was unallocatable across every data centre, secure and community, with no network volume and no CUDA floor attached -- while RTX 5090, RTX PRO 4500, L40S, H100 NVL, H200 and B200 all allocated on the first try. GraphQL stockStatus said 'Low' for the RTX PRO 6000 throughout, so it is not a usable signal for whether a Pod can actually be created; only attempting creation is. Capacity rejections create no Pod and bill nothing, so the provider now sweeps this list several times before giving up.",
   "vram_note": "The 96 GB floor in policy v1 was inherited from Wan, which peaked at 91.3 GB. H3 does not need it: MiniMax and SGLang publish single-GPU recipes down to a 24 GB RTX 4090 using layerwise offload, and the worker now picks a residency plan from the VRAM it actually finds. 96 GB keeps the DiT resident and is still preferred; smaller cards trade speed for availability. The 32B Qwen3-VL text encoder streams from host memory on every tier because it never fits alongside the DiT in BF16.",
-  "architecture_note": "The image builds SageAttention 2.2 for SM 8.9, 9.0 and 12.0, so every card below runs the fast attention path without a rebuild. A100 (SM 8.0) is excluded on capability, not preference: online FP8 needs SM >= 8.9. H100 NVL ($3.19) and H200 ($4.59) are excluded by the $3/h cap alone -- the kernels cover them, so raising the cap is the only change they need. B200 (SM 10.0) needs more than a cap change: SageAttention v2.2.0 pins SUPPORTED_ARCHS to {8.0, 8.6, 8.9, 9.0, 12.0} and fails the build on anything else, so it would have to run a different attention backend.",
+  "architecture_note": "The image builds SageAttention 2.2 for SM 12.0 only, so this list is limited to Blackwell RTX PRO / GeForce cards. Widening the build to 8.9 (L40S, RTX 6000 Ada) and 9.0 (H100, H200) failed the GitHub-hosted build four times inside 9 minutes against one 36.9-minute success at 12.0, and the cause is not diagnosed because the Actions logs are not readable from this machine. A card must not be listed here until the image actually carries kernels for it, or the Pod silently falls back to a slower attention path. SM 10.0 (B200) is impossible at this SageAttention version: SUPPORTED_ARCHS is pinned to {8.0, 8.6, 8.9, 9.0, 12.0}. A100 (SM 8.0) is excluded separately because online FP8 needs SM >= 8.9.",
   "gpu_types": [
     {
       "id": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
@@ -38,28 +38,12 @@
       "priority": 3
     },
     {
-      "id": "NVIDIA L40S",
-      "vram_gb": 48,
-      "compute_capability": "8.9",
-      "secure_price_usd_per_hour": 0.99,
-      "residency": "partial-layerwise-offload",
-      "priority": 4
-    },
-    {
-      "id": "NVIDIA RTX 6000 Ada Generation",
-      "vram_gb": 48,
-      "compute_capability": "8.9",
-      "secure_price_usd_per_hour": 0.84,
-      "residency": "partial-layerwise-offload",
-      "priority": 5
-    },
-    {
       "id": "NVIDIA GeForce RTX 5090",
       "vram_gb": 32,
       "compute_capability": "12.0",
       "secure_price_usd_per_hour": 0.99,
       "residency": "full-layerwise-offload",
-      "priority": 6
+      "priority": 4
     },
     {
       "id": "NVIDIA RTX PRO 4500 Blackwell",
@@ -67,7 +51,7 @@
       "compute_capability": "12.0",
       "secure_price_usd_per_hour": 0.72,
       "residency": "full-layerwise-offload",
-      "priority": 7
+      "priority": 5
     }
   ]
 }

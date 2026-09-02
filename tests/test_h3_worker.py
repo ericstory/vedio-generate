@@ -169,8 +169,9 @@ def test_h3_gpu_policy_spans_every_architecture_the_image_supports() -> None:
         arch.strip()
         for arch in dockerfile.split('TORCH_CUDA_ARCH_LIST="')[1].split('"')[0].split(";")
     }
-    # SM 10.0 (B200) is absent because SageAttention v2.2.0 refuses to build it.
-    assert built == {"8.9", "9.0", "12.0"}
+    # Only the arch list that has actually built. Widening it is a change to make
+    # deliberately, with the policy updated in the same commit.
+    assert built == {"12.0"}
     assert {g["compute_capability"] for g in gpus} <= built
     # Online FP8 needs SM >= 8.9, which rules out the A100 generation.
     assert all(float(g["compute_capability"]) >= 8.9 for g in gpus)
