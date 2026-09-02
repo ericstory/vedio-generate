@@ -39,5 +39,9 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/papa-minimax-h3:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No GHA layer cache on purpose. GitHub allows 10 GB of cache per
+          # repository, shared with the LTX and Wan workflows, and this image is
+          # 14 GB on its own -- exporting it can never fit, while restoring a
+          # partial cache still costs runner disk the build needs. The only
+          # expensive layer is the SageAttention compile, and that is invalidated
+          # by every change we actually make to it.
