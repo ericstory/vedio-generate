@@ -5,11 +5,14 @@
 MiniMax H3 主线的代码、控制面、模型权重、Railway 部署全部就位，UI 里能选到 H3，
 **但从未成功出过一次片**。
 
-唯一的硬阻塞是 **H3 镜像的 CI 构建**：连续五次失败，根因未确诊，
-所以没有一个包含 volume-free 能力的可用镜像。GPU 可用性问题已经设计并实现了解决方案
-（volume-free，任意 DC × 任意合适卡），但因为没有镜像，**未经端到端验证**。
+曾经卡住一整天的 CI 构建**根因已确诊并修复**（huggingface_hub 升级破坏了
+SageAttention 的元数据生成，详见第四节）。修复提交 `d5dd9d5` 的构建在写下这段时
+已跑过 5.4 分钟——远超之前 8 秒就挂的失败点——但**尚未确认成功**。
 
-**下一个会话的第一件事：拿一个能读 GitHub Actions 日志的 token**（见第四节）。
+GPU 可用性问题已经设计并实现了解决方案（volume-free，任意 DC × 任意合适卡），
+但因为一直没有可用镜像，**整条链路未经端到端验证**。
+
+**下一个会话的第一件事：确认 `d5dd9d5` 的镜像构建结果，然后按第九节往下走。**
 
 ---
 
@@ -44,10 +47,11 @@ H3 是 Artificial Analysis 盲评开源第一（T2V Elo 1301 无音频 / 1227 �
 | `214c818` | 容量失败重试 3 轮 + 容量错误不再误报为"提示词违规" |
 | `5c8e6f0` | 显存自适应常驻档位 + GPU 候选列表 |
 | `9b75b4f` | **volume-free**：卷为空则不钉 DC，worker 开机自己下权重 |
-| `e4522a1` / `8527785` / `13de95d` | 构建失败的三轮排查（SM 10.0 / 缓存 / 退回单架构，**全部未解决**）|
-| `aa093a5` | 本交接文档 |
+| `e4522a1` / `8527785` / `13de95d` | 构建失败的三轮排查（三个假设，**全部错了**）|
+| `aa093a5` / `cb8725f` | 本交接文档 |
+| `d5dd9d5` | **真正的修复**：不再升级 huggingface_hub，改用 Python API 下载 |
 
-测试 82 个全过。
+测试 83 个全过。
 
 ---
 
@@ -75,58 +79,55 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 
 ---
 
-## 四、⛔ 未解决：H3 镜像 CI 构建失败
+## 四、✅ 已确诊并修复：H3 镜像 CI 构建失败
 
-| 提交 | 架构列表 | 缓存 | 构建步骤耗时 | 结果 |
-| --- | --- | --- | --- | --- |
-| `8d5e397` | `12.0` | 有（冷） | **36.9 分钟** | ✅ 成功 |
-| `5c8e6f0` | `8.9;9.0;10.0;12.0` | 有 | 5.9 分钟 | ❌ |
-| `9b75b4f` | 同上 | 有 | 4.3 分钟 | ❌ |
-| `e4522a1` | `8.9;9.0;12.0` | 有 | 8.6 分钟 | ❌ |
-| `8527785` | `8.9;9.0;12.0` | **无** | 4.4 分钟 | ❌ |
-| `13de95d` | `12.0`（退回到成功过的架构列表） | 无 | — | ❌ |
+**根因**（2026-09-02，拿到能读 Actions 日志的 GitHub token 后一次定位）：
 
-⚠️ **最后一行是最重要的信息**：退回到与 `8d5e397` 完全相同的架构列表**仍然失败**，
-所以**架构列表不是原因**，"SM 12.0 是已知可构建配置"这个说法现在也不成立了。
+```
+File ".../huggingface_hub/dataclasses.py", line 332, in type_validator
+    raise TypeError(f"Unsupported type for field '{name}': {expected_type}")
+TypeError: Unsupported type for field 'import_name': str | None
+error: metadata-generation-failed  ->  sageattention
+```
 
-`8d5e397`（唯一成功）与 `13de95d`（失败）之间剩下的差异只有三项，下一个会话应从这里查：
+`9b75b4f` 为了 volume-free 需要 `hf` 命令而装了 `huggingface_hub[cli]>=0.35,<1`，
+**升级了 sglang 基础镜像自带的那份**；新版严格 dataclass 校验器在 SageAttention
+生成包元数据时抛异常。构建死在那一层的**第 8 秒**，连一个 kernel 都没编——
+所以改架构列表怎么都没用。
 
-1. pip 层加了 `huggingface_hub[cli]>=0.35,<1`（volume-free 需要 `hf` 命令）
-2. 移除了 `cache-from` / `cache-to`
-3. `handler.py` / `download_models.sh` 的内容变化（只是 COPY，最后一层，理论上无风险）
+**修复**（`d5dd9d5`）：不装也不升级 huggingface_hub。sglang 本来就依赖它，
+`download_models.py` 改用 **Python API**（`snapshot_download`）而非 `hf` 命令。
+`download_models.sh` 退化为薄包装，仍可在独立 CPU Pod 上灌卷。
+测试 `test_h3_image_does_not_disturb_the_base_huggingface_hub` 断言
+Dockerfile 里永远不再出现 huggingface_hub 的安装行。
 
-也不能排除**环境变化**：GitHub 托管 runner 的可用磁盘、或上游某个依赖在两次构建之间变了。
-基础镜像是按 digest 钉死的，可以排除。
+### 五次失败其实是三个不同原因
 
-**四个被实验推翻的假设，不要重复走**：
+| 提交 | 真实原因 |
+| --- | --- |
+| `5c8e6f0` | **GitHub runner 被强制关机**（`The runner has received a shutdown signal`），wheel 编译跑到 77 秒被杀。基础设施事件，与代码无关 |
+| `9b75b4f` / `e4522a1` / `8527785` / `13de95d` | **全部是 huggingface_hub 升级** |
 
-1. ~~CUDA 13 floor 缩小了宿主机池~~ —— 去掉 `minCudaVersion`、去掉卷、不限 DC、连
-   community 都试，RTX PRO 6000 照样分不到。**是真缺货，不是过滤条件。**
-2. ~~SM 10.0 不被支持导致失败~~ —— SageAttention v2.2.0 的 `setup.py` 里
-   `SUPPORTED_ARCHS = {8.0, 8.6, 8.9, 9.0, 12.0}` 确实没有 10.0 且会 `raise`，
-   **这是真 bug 必须避开**，但去掉它之后仍然失败。
-3. ~~GHA 层缓存撑爆 runner 磁盘~~ —— 相关性很强（唯一成功的是唯一无缓存的），
-   但移除 `cache-to` 后 4.4 分钟同样失败。**推翻。**
-4. ~~多架构编译太重~~ —— 退回单架构 `12.0`（与成功那次完全一致）**仍然失败**。**推翻。**
+**把它们当成同一个问题追，是走弯路的根本原因。** 有日志之后一次分类就看清了。
 
-复现 Pod（`lmsysorg/sglang:v0.5.18-cu130`，cpu3c×8，80GB 盘）排除了资源问题：
-80GB 全空、754GB 内存、CUDA 13.0 正常。它自己死在无关的 `git clone` 认证失败
-（`could not read Username for 'https://github.com'`）——**顺带暴露一个待修的脆弱点：
-Dockerfile 用 `pip install git+https://...` 装 SageAttention，网络受限环境会挂。
-改成装固定 commit 的 codeload tarball 可以把 git 从构建路径去掉。**
+### 教训
 
-**下一步要做的第一件事**：拿一个有 `repo` 权限的 GitHub token 读 Actions 日志。
-本机只有 SSH push 凭据（`~/.config/gh` 不存在，keychain 里没有 github.com 条目），
-RunPod 那个 GHCR PAT 只有 `read:packages`，权限不够。没有日志就只能二分猜，
-今天已经因此浪费了**五次**构建、推翻了四个假设。匿名调 GitHub API 还会撞限流
-（本次会话末尾已撞上），有 token 也能顺带解决。
+- 拿不到日志时**不要靠改配置二分猜**：五次构建、四个假设全错（CUDA floor、
+  SM 10.0、GHA 层缓存、多架构太重），真因不在任何一个里面
+- Actions 日志 API 会 302 到 Azure blob，**重定向时不能带 `Authorization` 头**，
+  否则 401。要手动处理重定向（`scratchpad/watch_ci.sh` 里有可用实现）
+- 往一个精心 pin 过的基础镜像里 `pip install` 任何东西，都可能悄悄升级它的依赖
 
-拿到日志前**不要再改 Dockerfile 试**——五次构建的经验是盲改只会消耗时间。
+### 仍待验证（独立变量，别和别的改动混在一起）
 
-顺带一个已知待修的脆弱点（不一定是本次根因，但值得改）：Dockerfile 用
-`pip install git+https://...` 装 SageAttention，`git clone` 在受限网络会尝试交互式认证
-然后失败（复现 Pod 上实际发生过）。改成装固定 commit 的 codeload tarball
-（`https://github.com/thu-ml/SageAttention/archive/<sha>.tar.gz`）可以把 git 从构建路径去掉。
+**多架构编译从未真正完成过**——唯一跑到编译阶段的那次被 runner 杀了。
+当前是 SM 12.0 单架构。想扩到 8.9（L40S、RTX 6000 Ada）和 9.0（H100、H200）
+必须**单独一个提交**试，并同步更新 `gpu_policy.json`（测试会强制两者一致）。
+SM 10.0（B200）永远不行：SageAttention v2.2.0 的 `SUPPORTED_ARCHS` 里没有它。
+
+另一个已知脆弱点：Dockerfile 用 `pip install git+https://...` 装 SageAttention，
+`git clone` 在受限网络会尝试交互式认证然后失败（复现 Pod 上实际发生过）。
+改成装固定 commit 的 codeload tarball 可把 git 从构建路径去掉。
 
 ---
 
@@ -222,8 +223,8 @@ HF token 已在 Railway 变量里，权限够。
 
 ## 九、下一步顺序
 
-1. **拿 GitHub token**（`repo` 权限）→ 读 Actions 日志 → 确诊构建失败根因
-2. 构建修好后 → 用新 SHA 建 **volume-free 模板**
+1. **确认 `d5dd9d5` 构建成功**（失败就再读日志，方法见第四节）
+2. 用新 SHA 建 **volume-free 模板**
    （`ROOT=/models/MiniMax-H3-PinkCherry`、`disk=220`、带 `HF_TOKEN` 和
    `H3_DOWNLOAD_ON_START=1`，脚本见 scratchpad `mktemplate.py`）
 3. Railway 设 `RUNPOD_H3_POD_NETWORK_VOLUME_ID=`（**留空**）+
