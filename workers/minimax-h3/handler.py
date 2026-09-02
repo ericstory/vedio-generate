@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -114,7 +115,7 @@ def _progress(job: dict[str, Any], stage: str, **details: Any) -> None:
 
 
 DOWNLOAD_MARKER = MODEL_ROOT / ".download-complete"
-DOWNLOAD_SCRIPT = Path(__file__).with_name("download_models.sh")
+DOWNLOAD_SCRIPT = Path(__file__).with_name("download_models.py")
 
 
 def _required_model_files() -> list[Path]:
@@ -150,7 +151,7 @@ def ensure_models(job: dict[str, Any] | None = None) -> float:
     env = {**os.environ, "MODEL_ROOT": str(MODEL_ROOT)}
     # An anonymous pull is rate limited by Hugging Face, and every cold start
     # repeats it, so the token is worth having even for public repositories.
-    subprocess.run(["bash", str(DOWNLOAD_SCRIPT)], check=True, env=env)
+    subprocess.run([sys.executable, str(DOWNLOAD_SCRIPT)], check=True, env=env)
     DOWNLOAD_MARKER.touch()
     seconds = round(time.monotonic() - started, 3)
     if job is not None:

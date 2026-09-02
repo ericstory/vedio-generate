@@ -14,12 +14,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
-# huggingface_hub[cli] provides the `hf` command download_models.sh drives at
-# start-up when the Pod has no network volume attached.
+# huggingface_hub is deliberately NOT installed or upgraded here. SGLang already
+# depends on it, and pulling huggingface_hub[cli] to get the `hf` command
+# upgraded that copy to a release whose strict dataclass validator raises
+#   TypeError: Unsupported type for field 'import_name': str | None
+# while SageAttention generates its package metadata, failing this build at 8
+# seconds. download_models.py uses the Python API instead.
 RUN pip install --break-system-packages --no-cache-dir \
       "imageio-ffmpeg==0.6.0" \
       "boto3>=1.40,<2" \
-      "huggingface_hub[cli]>=0.35,<1" \
       "httpx>=0.28,<1" \
     && pip install --break-system-packages --no-cache-dir --ignore-installed cryptography \
       "runpod>=1.8,<2"
@@ -52,6 +55,6 @@ RUN nvcc --version \
     && python -c "import sageattention"
 
 WORKDIR /app
-COPY handler.py worker_config.py smoke.py download_models.sh /app/
+COPY handler.py worker_config.py smoke.py download_models.py download_models.sh /app/
 RUN chmod 0755 /app/download_models.sh
 CMD ["python", "/app/handler.py"]

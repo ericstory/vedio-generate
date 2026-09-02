@@ -240,9 +240,28 @@ def test_h3_model_lock_pins_loadable_weight_formats() -> None:
     assert required < lock["recommended_network_volume_gb"] * 1_000_000_000
 
 
-def test_h3_download_script_skips_the_replaced_transformer_by_default() -> None:
-    script = (WORKER_ROOT / "download_models.sh").read_text(encoding="utf-8")
-    assert 'INCLUDE_STOCK_TRANSFORMER:-0' in script
-    assert '--exclude "FL2VA/transformer/*.safetensors"' in script
-    assert '--exclude "Ref2VA/*"' in script
-    assert "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors" in script
+def test_h3_download_skips_the_replaced_transformer_by_default() -> None:
+    source = (WORKER_ROOT / "download_models.py").read_text(encoding="utf-8")
+    assert 'INCLUDE_STOCK_TRANSFORMER", "0"' in source
+    assert 'ignore.append("FL2VA/transformer/*.safetensors")' in source
+    assert '"Ref2VA/*"' in source
+    assert "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors" in source
+
+
+def test_h3_image_does_not_disturb_the_base_huggingface_hub() -> None:
+    """Upgrading it broke the SageAttention build; the download path must not need to.
+
+    Installing huggingface_hub[cli] for the `hf` command pulled in a release whose
+    strict dataclass validator raises on a `str | None` annotation while
+    SageAttention prepares its metadata, failing the image build eight seconds in.
+    """
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    install_lines = [
+        line for line in dockerfile.splitlines()
+        if "huggingface_hub" in line and not line.strip().startswith("#")
+    ]
+    assert install_lines == []
+    source = (WORKER_ROOT / "download_models.py").read_text(encoding="utf-8")
+    # The Python API ships with SGLang's own dependency; the CLI does not.
+    assert "from huggingface_hub import snapshot_download" in source
+    assert "hf download" not in source
