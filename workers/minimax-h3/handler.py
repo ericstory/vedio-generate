@@ -113,13 +113,53 @@ def _progress(job: dict[str, Any], stage: str, **details: Any) -> None:
             pass
 
 
-def _require_models() -> None:
+DOWNLOAD_MARKER = MODEL_ROOT / ".download-complete"
+DOWNLOAD_SCRIPT = Path(__file__).with_name("download_models.sh")
+
+
+def _required_model_files() -> list[Path]:
     required = [BASE_MODEL_ROOT / "model_index.json"]
     if NSFW_TRANSFORMER_ENABLED:
         required.append(NSFW_TRANSFORMER)
     if TURBO_LORA_ENABLED:
         required.append(TURBO_LORA)
-    missing = [str(path) for path in required if not path.is_file()]
+    return required
+
+
+def ensure_models(job: dict[str, Any] | None = None) -> float:
+    """Fetch the weights to container disk when no network volume supplied them.
+
+    A regional volume pins the Pod to the one data centre that holds it, and
+    that pin is what made this lane unschedulable: every card we can run was
+    available somewhere, just never in those two data centres. Pulling ~145 GB
+    at start costs a few minutes and buys placement anywhere. It is also not
+    obviously slower -- Wan's volume loads were measured anywhere from 90 to 805
+    seconds, while this download measured about 5 minutes.
+    """
+    if all(path.is_file() for path in _required_model_files()):
+        return 0.0
+    if os.getenv("H3_DOWNLOAD_ON_START", "1") != "1":
+        missing = [str(p) for p in _required_model_files() if not p.is_file()]
+        raise RuntimeError(
+            "MiniMax H3 weights are missing and start-up download is disabled: "
+            + ", ".join(missing)
+        )
+    if job is not None:
+        _progress(job, "model_download_start")
+    started = time.monotonic()
+    env = {**os.environ, "MODEL_ROOT": str(MODEL_ROOT)}
+    # An anonymous pull is rate limited by Hugging Face, and every cold start
+    # repeats it, so the token is worth having even for public repositories.
+    subprocess.run(["bash", str(DOWNLOAD_SCRIPT)], check=True, env=env)
+    DOWNLOAD_MARKER.touch()
+    seconds = round(time.monotonic() - started, 3)
+    if job is not None:
+        _progress(job, "model_download_done", seconds=seconds)
+    return seconds
+
+
+def _require_models() -> None:
+    missing = [str(path) for path in _required_model_files() if not path.is_file()]
     if missing:
         raise RuntimeError(
             "MiniMax H3 requires the FL2VA partition and every enabled weight "
@@ -334,6 +374,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         rendered = Path(directory) / "render.mp4"
         output = Path(directory) / "output.mp4"
         started = time.monotonic()
+        download_seconds = ensure_models(job)
         _progress(job, "model_load_start")
         load_started = time.monotonic()
         generator = _generator()
@@ -433,6 +474,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "inference_seconds": inference_seconds,
             "video_inference_seconds": video_seconds,
             "model_load_seconds": model_load_seconds,
+            "model_download_seconds": download_seconds,
             "upload_seconds": upload_seconds,
             "projected_denoise_seconds": projected_denoise_seconds,
             "inference_steps": steps,

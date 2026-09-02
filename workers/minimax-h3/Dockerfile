@@ -14,9 +14,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
+# huggingface_hub[cli] provides the `hf` command download_models.sh drives at
+# start-up when the Pod has no network volume attached.
 RUN pip install --break-system-packages --no-cache-dir \
       "imageio-ffmpeg==0.6.0" \
       "boto3>=1.40,<2" \
+      "huggingface_hub[cli]>=0.35,<1" \
       "httpx>=0.28,<1" \
     && pip install --break-system-packages --no-cache-dir --ignore-installed cryptography \
       "runpod>=1.8,<2"

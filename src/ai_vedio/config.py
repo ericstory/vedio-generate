@@ -83,6 +83,9 @@ class RunPodPodSettings:
     fallback_network_volume_id: str = ""
     additional_region_volumes: tuple[tuple[str, str], ...] = ()
     volume_mount_path: str = "/runpod-volume"
+    # Big enough to hold the weights when network_volume_id is empty and the
+    # worker pulls them to container disk instead.
+    container_disk_gb: int = 20
     # How many times to sweep the whole lane list before giving up on capacity.
     capacity_retry_sweeps: int = 3
     capacity_retry_delay_seconds: float = 5.0
@@ -275,7 +278,8 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
     return RunPodPodSettings(
         api_key=_required("RUNPOD_API_KEY"),
         template_id=_required("RUNPOD_H3_POD_TEMPLATE_ID"),
-        network_volume_id=_required("RUNPOD_H3_POD_NETWORK_VOLUME_ID"),
+        # Empty on purpose for the volume-free lane: no volume, no data-centre pin.
+        network_volume_id=os.getenv("RUNPOD_H3_POD_NETWORK_VOLUME_ID", "").strip(),
         callback_url=_required("RUNPOD_H3_POD_CALLBACK_URL"),
         callback_token=_required("VIDEO_UPLOAD_TOKEN"),
         api_base_url=os.getenv(
@@ -305,6 +309,7 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
         maximum_runtime_seconds=int(
             os.getenv("RUNPOD_H3_POD_MAX_RUNTIME_SECONDS", "1800")
         ),
+        container_disk_gb=int(os.getenv("RUNPOD_H3_POD_CONTAINER_DISK_GB", "220")),
         model_id=os.getenv("H3_MODEL_ID", "MiniMaxAI/MiniMax-H3"),
         model_version=os.getenv(
             "H3_MODEL_VERSION", "42ed227ee7df40d41602854ae760620d6eb651fe"

@@ -555,3 +555,52 @@ def test_pod_rejects_a_gpu_outside_the_candidate_list(monkeypatch) -> None:
     # An unlisted card is deleted rather than silently billed and run on.
     assert deleted == ["pod-x"]
     client.close()
+
+
+def test_volume_free_lane_drops_the_data_centre_pin(monkeypatch) -> None:
+    """No volume means no region lock, which is the whole point of the lane."""
+    from ai_vedio.config import RunPodPodSettings
+    from ai_vedio.runpod import RunPodPodClient
+
+    settings = RunPodPodSettings(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        gpu_id="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        additional_gpu_ids=("NVIDIA GeForce RTX 5090",),
+        # Set but must be ignored while there is no volume to pin us to them.
+        data_center_id="US-NC-2",
+        fallback_data_center_id="US-KS-2",
+        fallback_network_volume_id="vol-fallback",
+        container_disk_gb=220,
+        capacity_retry_sweeps=1,
+        capacity_retry_delay_seconds=0,
+        ui_model_id="minimax-h3-pinkcherry",
+    )
+    client = RunPodPodClient(settings)
+    bodies: list[dict] = []
+
+    def fake_request(method, path, **kwargs):
+        if method == "GET":
+            return {"env": {}}
+        body = kwargs["json"]
+        bodies.append(body)
+        if body["gpu"]["id"] != "NVIDIA GeForce RTX 5090":
+            raise _capacity_error()
+        return {"id": "pod-any", "cost": 0.99, "gpu": {"id": body["gpu"]["id"]}}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    result = client.create_text_video(
+        prompt="cinematic wide shot", model="minimax-h3-pinkcherry", task_id="task-1"
+    )
+    assert result["id"] == "pod-any"
+    # One attempt per GPU, not per (GPU x data centre): there are no lanes now.
+    assert len(bodies) == 2
+    for body in bodies:
+        assert "dataCenterIds" not in body
+        assert "mounts" not in body
+        # Container disk has to hold the weights the volume used to hold.
+        assert body["disk"] == 220
+    client.close()

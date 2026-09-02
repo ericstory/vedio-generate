@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# With a network volume mounted the weights persist there between Pods. Without
+# one the Pod is free to land in any data centre, and the weights come down to
+# container disk on every cold start instead.
 if [[ -d /runpod-volume ]]; then
   DEFAULT_ROOT=/runpod-volume/models/MiniMax-H3-PinkCherry
 else
-  DEFAULT_ROOT=/workspace/models/MiniMax-H3-PinkCherry
+  DEFAULT_ROOT=/models/MiniMax-H3-PinkCherry
 fi
 
 MODEL_ROOT="${MODEL_ROOT:-$DEFAULT_ROOT}"

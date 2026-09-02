@@ -303,7 +303,7 @@ class RunPodPodClient:
                 "dataCenterPriority": "custom",
                 "allowedCudaVersions": ["13.0"],
                 "volumeMountPath": self.settings.volume_mount_path,
-                "containerDiskInGb": 20,
+                "containerDiskInGb": self.settings.container_disk_gb,
                 "volumeInGb": 0,
                 "env": pod_env,
             }
@@ -319,13 +319,22 @@ class RunPodPodClient:
                     "count": 1,
                     "minCudaVersion": "13.0",
                 },
-                "disk": 20,
+                "disk": self.settings.container_disk_gb,
                 "env": pod_env,
             }
             # rp-migrate: ignore end
-        lanes = [(self.settings.data_center_id, self.settings.network_volume_id)]
+        # An empty volume id means the weights come down to container disk at
+        # start instead of off a regional volume. That drops the data-centre pin
+        # entirely, which is the difference between "any suitable card anywhere"
+        # and "the two data centres our volumes happen to live in" -- and on
+        # 2026-09-01 those two had zero suitable cards for hours.
+        if not self.settings.network_volume_id:
+            lanes: list[tuple[str, str]] = [("", "")]
+        else:
+            lanes = [(self.settings.data_center_id, self.settings.network_volume_id)]
         if (
-            self.settings.fallback_data_center_id
+            self.settings.network_volume_id
+            and self.settings.fallback_data_center_id
             and self.settings.fallback_network_volume_id
         ):
             lanes.append(
@@ -360,17 +369,18 @@ class RunPodPodClient:
         for index, (gpu_id, data_center_id, network_volume_id) in enumerate(attempts):
             if index and index % per_sweep == 0:
                 sleep(self.settings.capacity_retry_delay_seconds)
-            lane_payload = {
-                **payload,
-                "dataCenterIds": [data_center_id],
-            }
+            lane_payload = {**payload}
+            if data_center_id:
+                lane_payload["dataCenterIds"] = [data_center_id]
             if self.settings.use_management_api_v1:
                 # rp-migrate: keep-v1 start
                 lane_payload["gpuTypeIds"] = [gpu_id]  # rp-migrate: keep-v1
                 # rp-migrate: keep-v1 end
             else:
                 lane_payload["gpu"] = {**payload["gpu"], "id": gpu_id}
-            if self.settings.use_management_api_v1:
+            if not network_volume_id:
+                pass
+            elif self.settings.use_management_api_v1:
                 # rp-migrate: keep-v1 start
                 lane_payload["networkVolumeId"] = network_volume_id  # rp-migrate: keep-v1
                 # rp-migrate: keep-v1 end
