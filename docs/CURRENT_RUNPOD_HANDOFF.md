@@ -2,9 +2,14 @@
 
 ## 当前状态一句话
 
-MiniMax H3 主线的代码、镜像、控制面全部就位并已部署，UI 里能选到；
-**但从未成功出过一次片**，卡在两件事上：GPU 可用性（已用 volume-free 方案解决，未验证）
-和 H3 镜像的 CI 构建（根因未确诊，已退回已知可构建的配置）。
+MiniMax H3 主线的代码、控制面、模型权重、Railway 部署全部就位，UI 里能选到 H3，
+**但从未成功出过一次片**。
+
+唯一的硬阻塞是 **H3 镜像的 CI 构建**：连续五次失败，根因未确诊，
+所以没有一个包含 volume-free 能力的可用镜像。GPU 可用性问题已经设计并实现了解决方案
+（volume-free，任意 DC × 任意合适卡），但因为没有镜像，**未经端到端验证**。
+
+**下一个会话的第一件事：拿一个能读 GitHub Actions 日志的 token**（见第四节）。
 
 ---
 
@@ -39,7 +44,8 @@ H3 是 Artificial Analysis 盲评开源第一（T2V Elo 1301 无音频 / 1227 �
 | `214c818` | 容量失败重试 3 轮 + 容量错误不再误报为"提示词违规" |
 | `5c8e6f0` | 显存自适应常驻档位 + GPU 候选列表 |
 | `9b75b4f` | **volume-free**：卷为空则不钉 DC，worker 开机自己下权重 |
-| `e4522a1` / `8527785` / `13de95d` | 构建失败的三次排查与最终退回 |
+| `e4522a1` / `8527785` / `13de95d` | 构建失败的三轮排查（SM 10.0 / 缓存 / 退回单架构，**全部未解决**）|
+| `aa093a5` | 本交接文档 |
 
 测试 82 个全过。
 
@@ -78,9 +84,21 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 | `9b75b4f` | 同上 | 有 | 4.3 分钟 | ❌ |
 | `e4522a1` | `8.9;9.0;12.0` | 有 | 8.6 分钟 | ❌ |
 | `8527785` | `8.9;9.0;12.0` | **无** | 4.4 分钟 | ❌ |
-| `13de95d` | `12.0`（退回） | 无 | 进行中 | ? |
+| `13de95d` | `12.0`（退回到成功过的架构列表） | 无 | — | ❌ |
 
-**三个被实验推翻的假设，不要重复走**：
+⚠️ **最后一行是最重要的信息**：退回到与 `8d5e397` 完全相同的架构列表**仍然失败**，
+所以**架构列表不是原因**，"SM 12.0 是已知可构建配置"这个说法现在也不成立了。
+
+`8d5e397`（唯一成功）与 `13de95d`（失败）之间剩下的差异只有三项，下一个会话应从这里查：
+
+1. pip 层加了 `huggingface_hub[cli]>=0.35,<1`（volume-free 需要 `hf` 命令）
+2. 移除了 `cache-from` / `cache-to`
+3. `handler.py` / `download_models.sh` 的内容变化（只是 COPY，最后一层，理论上无风险）
+
+也不能排除**环境变化**：GitHub 托管 runner 的可用磁盘、或上游某个依赖在两次构建之间变了。
+基础镜像是按 digest 钉死的，可以排除。
+
+**四个被实验推翻的假设，不要重复走**：
 
 1. ~~CUDA 13 floor 缩小了宿主机池~~ —— 去掉 `minCudaVersion`、去掉卷、不限 DC、连
    community 都试，RTX PRO 6000 照样分不到。**是真缺货，不是过滤条件。**
@@ -89,6 +107,7 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
    **这是真 bug 必须避开**，但去掉它之后仍然失败。
 3. ~~GHA 层缓存撑爆 runner 磁盘~~ —— 相关性很强（唯一成功的是唯一无缓存的），
    但移除 `cache-to` 后 4.4 分钟同样失败。**推翻。**
+4. ~~多架构编译太重~~ —— 退回单架构 `12.0`（与成功那次完全一致）**仍然失败**。**推翻。**
 
 复现 Pod（`lmsysorg/sglang:v0.5.18-cu130`，cpu3c×8，80GB 盘）排除了资源问题：
 80GB 全空、754GB 内存、CUDA 13.0 正常。它自己死在无关的 `git clone` 认证失败
@@ -99,7 +118,15 @@ Dockerfile 用 `pip install git+https://...` 装 SageAttention，网络受限环
 **下一步要做的第一件事**：拿一个有 `repo` 权限的 GitHub token 读 Actions 日志。
 本机只有 SSH push 凭据（`~/.config/gh` 不存在，keychain 里没有 github.com 条目），
 RunPod 那个 GHCR PAT 只有 `read:packages`，权限不够。没有日志就只能二分猜，
-今天已经因此浪费了四次构建。
+今天已经因此浪费了**五次**构建、推翻了四个假设。匿名调 GitHub API 还会撞限流
+（本次会话末尾已撞上），有 token 也能顺带解决。
+
+拿到日志前**不要再改 Dockerfile 试**——五次构建的经验是盲改只会消耗时间。
+
+顺带一个已知待修的脆弱点（不一定是本次根因，但值得改）：Dockerfile 用
+`pip install git+https://...` 装 SageAttention，`git clone` 在受限网络会尝试交互式认证
+然后失败（复现 Pod 上实际发生过）。改成装固定 commit 的 codeload tarball
+（`https://github.com/thu-ml/SageAttention/archive/<sha>.tar.gz`）可以把 git 从构建路径去掉。
 
 ---
 
@@ -196,7 +223,7 @@ HF token 已在 Railway 变量里，权限够。
 ## 九、下一步顺序
 
 1. **拿 GitHub token**（`repo` 权限）→ 读 Actions 日志 → 确诊构建失败根因
-2. `13de95d` 若构建成功 → 用新 SHA 建 **volume-free 模板**
+2. 构建修好后 → 用新 SHA 建 **volume-free 模板**
    （`ROOT=/models/MiniMax-H3-PinkCherry`、`disk=220`、带 `HF_TOKEN` 和
    `H3_DOWNLOAD_ON_START=1`，脚本见 scratchpad `mktemplate.py`）
 3. Railway 设 `RUNPOD_H3_POD_NETWORK_VOLUME_ID=`（**留空**）+
