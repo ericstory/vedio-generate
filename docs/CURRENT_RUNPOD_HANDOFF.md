@@ -1,138 +1,225 @@
-# RunPod 双链路交接记录（2026-08-31 更新）
+# RunPod 链路交接记录（2026-09-02 更新）
 
-## 状态：同 GPU 对照测试已完成
+## 当前状态一句话
 
-V1（PinkCherry LTX 2.3）与 V2（Wan 2.2 A14B FP8 + 成人 LoRA + AudioLDM2）已在同一
-`NVIDIA RTX PRO 6000 Blackwell Server Edition`（96GB，US-KS-2，Secure `$2.09/h`）、
-同提示词/参数/seed 下各自完成端到端运行，指标与视频对照见
-[`ab-wan-ltx-rtx-pro-6000.md`](ab-wan-ltx-rtx-pro-6000.md)。终态 Pod 数为 0。
+MiniMax H3 主线的代码、镜像、控制面全部就位并已部署，UI 里能选到；
+**但从未成功出过一次片**，卡在两件事上：GPU 可用性（已用 volume-free 方案解决，未验证）
+和 H3 镜像的 CI 构建（根因未确诊，已退回已知可构建的配置）。
 
-## 本轮变更
+---
 
-- Railway 已部署 main（部署 `f134cc56`），CUDA floor 修复上线并被 NC2 真实建 Pod 验证。
-- Wan 镜像两个音频段缺陷已修复并推送：
-  - `d341704` — 镜像安装 accelerate（AudioLDM2 CPU offload 硬依赖）
-  - `ed4470f` — AudioLDM2 GPT2 rollout 重绑为公开 API 前向（transformers 5 兼容）
-- Wan 模板 `wjxhc0dtid` 镜像已指向
-  `ghcr.io/ericstory/papa-wan-video:ed4470f19c328e98a13066d0366935887fe589a9`。
-- 新增 RunPod registry 凭据 `cmtgxws1c003d14njrtc07zd2`（GHCR，`read:packages`
-  classic PAT，owner ericstory），已挂到 `km9g8f4guq` 与 `wjxhc0dtid` 两个模板。
-  背景：RunPod 共享出口 IP 的 GHCR 匿名拉取配额经常耗尽（`toomanyrequests`），
-  匿名拉取导致 LTX 5 次建 Pod 失败；认证拉取实测 2.5 分钟完成。PAT 过期后需轮换。
+## 一、决策与选型（已定）
 
-## 资源/费用
+主线从 Wan 2.2 换成 **MiniMax H3**，依据见
+[`model-gpu-selection-2026-09.md`](model-gpu-selection-2026-09.md)：
+H3 是 Artificial Analysis 盲评开源第一（T2V Elo 1301 无音频 / 1227 有音频，总榜第 4），
+原生 32kHz 立体声一次出片，PinkCherry 作者已把整套 NSFW 微调迁过来。
 
-- 运行中 Pod：`0`；仅网络卷存储费（KS2/NE1/NC2 共 7 卷，约 $11.90/月 新增部分见旧记录）
-- 账户 8 月 GPU 累计约 `$4.96`（本轮对照 + 缺陷修复重跑约 `$3.2`）
+链路角色：
 
-## 模板/镜像
-
-- Wan 模板：`wjxhc0dtid` → 镜像 `c11714b5340edc4ed8a0f1be5791c983fd7a1bee`
-  （含 SageAttention v2.2.0 SM12.0 源码编译；env `WAN_ATTENTION_BACKEND=sage_attn`）
-- LTX 模板：`km9g8f4guq` → 镜像 `87901bc5d36164d54f211b94efdc2f3165b8a2b8`
-- 两模板 registry 凭据：`cmtgxws1c003d14njrtc07zd2`
-
-## 加速与监控（2026-08-31 追加）
-
-- Wan 链路监控上线：worker 各阶段经 `POST /generate/api/internal/pod-progress/{task_id}`
-  实时回报，`provider_metadata` 携带 model_load/video/audio/upload 拆分计时与后端元数据，
-  UI 详情页显示实时阶段。Railway 部署 `b1921258`。
-- sage_attn 实测（480p/4s）：纯视频 227.9s（基线 ~281s），端到端 7.1 分钟（基线 13.8），
-  单次 ~$0.25。详见 `ab-wan-ltx-rtx-pro-6000.md` 追加章节，含 720p/12s 不可行结论与
-  参数上限换算表。
-- 实际事故记录：用户 720p/12s 任务必然触发 30 分钟上限，已按用户决定取消止损（~$0.56）。
-  UI 暂无参数上限提示，建议后续在前端对超上限组合给出预估与警告。
-
-## Lightning fast profile（2026-08-31 晚追加）
-
-- Wan 现为 4 步蒸馏 fast profile：模板 adapter 指向 `fused-lora/{high,low}_adult_lightning_v1.safetensors`
-  （成人+Lightning 离线融合单 adapter，dynamic 模式），steps=4、CFG 1.0/1.0、flow_shift=5.0、
-  workflow `…lightning4fused…-v7`，镜像 `d7cd5ba1…`。
-- 实测：480p/4s 端到端 4 分 44 秒；720p/10s 端到端 ~7 分钟。
-- **⚠️ 720p/12s 输出为全黑**（sglang FFN int32 索引溢出，tokens>155k 触发；隔离矩阵见
-  ab 文档）。已在 worker（token 预算校验）与 web（提交拦截）双层封锁：**Wan 720p
-  上限 10 秒**；12–15 秒长片走 LTX。画质待用户盲评，回切 40 步质量档只需还原模板 env。
-- sglang v0.5.16 两个已确认限制（勿踩）：dynamic 每 target 单 adapter；merge 模式对
-  modelopt-FP8 有维度 bug。
-- Railway Wan 通道当前主/兜底均为 **US-NC-2**（`nv7g5aobqn`），KS2 融合文件补齐后应恢复
-  KS2 主（`RUNPOD_WAN_POD_DATA_CENTER_ID=US-KS-2`、`NETWORK_VOLUME_ID=3xl6dvrx0p`、
-  fallback NE1 需先补 lightning+fused 文件或保持禁用）。
-- 运维教训：一次性 Pod 的删除保底必须独立于本地会话进程（本轮 NC2 下载 Pod 因守护进程
-  被清理多计费 ~70 分钟 ≈$2.7）。
-
-## 画质反馈与当前档位（2026-09-01）
-
-- 用户实测 4 步蒸馏画质不达标。已把 fast profile 升到 **8 步**
-  （workflow `…lightning8fused…-v8`，仅模板 env 变更），画质/速度中点，待用户复测。
-- 若 8 步仍不达标：模板还原三项即可回 40 步质量档（adapter 路径换回
-  `adult-lora/NSFW-22-*.safetensors`、steps=40、CFG 4.0/3.0、去掉 WAN_FLOW_SHIFT）。
-- 正解（下个会话）：**按请求选质量档**——UI 加"快速/质量"开关，payload 带 steps/profile
-  透传到 worker，两档共存不再全局切换。
-
-## 硬件统一决策（用户 2026-09-01 拍板）
-
-V1（LTX）、V2（Wan）、未来新链路统一使用 `NVIDIA RTX PRO 6000 Blackwell Server Edition`。
-现状：V2 已是；**V1 生产链路仍在 H100 serverless（NE1）**，需迁移为 RTX PRO 6000
-一次性 Pod 模式（模板 `km9g8f4guq` 与 KS2/NC2 卷已就绪，缺的是把 web 的 LTX provider
-从 serverless 改为 pod 链路 + 回调，参照 Wan pod provider 实现）。
-
-选型复核见 [`model-gpu-selection-2026-09.md`](model-gpu-selection-2026-09.md)：
-96GB 不只是够用，而是 RunPod secure 上唯一有真实供给的档位（48GB 及以下的卡在 21 个
-支持网络卷的 DC 里几乎零库存）。另外查实 **serverless 有约 49% 附加费**，V1 迁到
-按需 Pod 后单价从 `$4.79/h` 降到 `$2.09/h`。
-
-## 主线切换：MiniMax H3 + PinkCherry（2026-09-01 代码已就位，未上机）
-
-用户拍板把主线从 Wan 2.2 换成 MiniMax H3。理由：H3 是 Artificial Analysis 盲评的
-**开源第一**（T2V Elo 1301 无音频 / 1227 有音频，总榜第 4，只输给闭源的 Wan 3.0 和
-Seedance 2.0），原生 32kHz 立体声一次出片，而且 V1 用的 PinkCherry 的作者
-（`SexGod1979`）已经把整套 NSFW 微调迁到了 H3。
-
-- 新 Worker：`workers/minimax-h3/`，SGLang Diffusion 原生 `DiffGenerator`，
-  **不依赖 ComfyUI**、不起 server、**没有第二个音频模型**（AudioLDM2 那一段整段删掉）。
-- 基座 `MiniMaxAI/MiniMax-H3` FL2VA 分区 + PinkCherry beta-0.6 完整微调 DiT
-  （经单文件 `transformer_weights_path` 覆盖）+ lightx2v 8 步蒸馏 LoRA。
-- PinkCherry 的可加载性是**读 safetensors 头部验证过的**：535 个张量，名称/形状与官方
-  FL2VA transformer 逐项一致。仓库里的 `int8_convrot` 变体是 ComfyUI 量化，不可用。
-- 控制面：新 provider `runpod_h3_pod`，与 Wan 共用一次性 Pod 契约（价格上限、
-  30 分钟超时、终态回调删 Pod、进度回调）。UI 选项由 `H3_ENABLED` 开关控制，默认关。
-- 卷：默认 145.4GB（跳过被 PinkCherry 替换掉的 66.28GB 官方分片），建议 170GB 单卷。
-
-**还没上过机**。首轮要花钱确认的 5 件事写在 `workers/minimax-h3/README.md` 末尾，
-最关键的是峰值显存、单次耗时、在线 FP8 之后 merge LoRA 是否正确。
-
-### H3 资源清单（2026-09-01 建，方案 B）
-
-| 资源 | ID | 说明 |
+| 代号 | 模型 | 状态 |
 | --- | --- | --- |
-| 卷（主） | `n7meo4oft2` | US-NC-2，170GB，已灌满 |
-| 卷（备） | `qextiwmyla` | US-KS-2，170GB，已灌满 |
-| 镜像 | `ghcr.io/ericstory/papa-minimax-h3:<sha>` | GHCR，registry 凭据 `cmtgxws1c003d14njrtc07zd2` |
-| 模板 | 见 Railway `RUNPOD_H3_POD_TEMPLATE_ID` | `args={"cmd":["python","/app/smoke.py"]}` |
+| 主线 | MiniMax H3 + PinkCherry + lightx2v 8 步 turbo | 代码就位，**未跑通** |
+| 兜底 | PinkCherry LTX 2.3 | 生产中（仍在 H100 serverless） |
+| 对照 | Wan 2.2 A14B | 保留不再投入 |
 
-两卷内容实测一致：`145,443,261,098` / `145,443,261,107` 字节，与 `models.lock.json` 的
-`expected_download_bytes`（145,443,193,257）差约 68KB，即 HF 的 `.cache` 元数据。
+用户已拍板的产品形态：UI 里给**两个 NSFW 能力**——
+「H3 · 10Eros Max 快速档」和「H3 · PinkCherry 质量档」。保温方式选 **A：纯自动空闲超时**。
 
-下载用 **CPU pod**（`python:3.12-slim` + 公开仓库里的 `download_models.sh`），不是 GPU pod：
-145GB 约 5 分钟下完，单价 `$0.03/vCPU/h`，就算守护失效跑一整天也只有几美元，而 GPU pod
-同样的疏忽是 `$50/天`。KS-2 首次申请 8 vCPU 直接返回"无实例可用"，降到 4 vCPU 才建上——
-下载这种可重试的活儿不该占 GPU 配额。
+---
 
-### 存储成本的实际口径（更正）
+## 二、已完成并提交（main 分支）
 
-`/v2/billing` 窗口总额会低估：卷是月底才建的，只计了几天。按最后一个完整日算 run rate：
-2026-08-31 是 `$1.42/天 ≈ $43/月`（660GB）。加上 H3 两个 170GB 卷后约 **$70/月**。
-H3 冒烟通过后按方案 B 清理：删 Wan BF16 遗留卷 `p7dkzdmomf`（NE-1 150GB）、3 个 Wan FP8
-卷（210GB）、LTX 冗余卷，目标回到约 `$28/月`。**LTX 的 NE-1 卷 `fn6at7unxa` 不能删**——
-V1 生产 serverless endpoint `aoma1602mogius` 还挂着它，要等 V1 迁到 Pod 链路之后。
+| 提交 | 内容 |
+| --- | --- |
+| `96fba7e` | H3 worker（sglang `DiffGenerator` 原生，无 ComfyUI、无第二音频模型）+ 控制面 provider |
+| `8d5e397` | H3 镜像 CI workflow |
+| `a7f466c` | 下拉里 H3 排第一、LTX 标为兜底 |
+| `9fff2c1` | 资源清单 + 存储成本口径更正 |
+| `214c818` | 容量失败重试 3 轮 + 容量错误不再误报为"提示词违规" |
+| `5c8e6f0` | 显存自适应常驻档位 + GPU 候选列表 |
+| `9b75b4f` | **volume-free**：卷为空则不钉 DC，worker 开机自己下权重 |
+| `e4522a1` / `8527785` / `13de95d` | 构建失败的三次排查与最终退回 |
 
-## 下一步建议
+测试 82 个全过。
 
-1. 建 H3 的 170GB 网络卷（建议 US-NC-2，当前 RTX PRO 6000 secure 库存最好）+ 一次性
-   模板，跑 `download_models.sh`，然后单 Pod 冒烟 1 次确认能出片。
-2. 用实测填 `H3_SECONDS_PER_MPIXEL_STEP`，把 30 分钟超时守卫打开——Wan 就是栽在
-   没有这个守卫上（720p/12s 必超时，计费后才失败）。
-3. H3 vs LTX 2.3 的人工盲评（H3 通过后再谈把 Wan 下线）。
-4. V1 LTX 从 serverless 迁到按需 Pod（省 56% 单价，且不再交 serverless 附加费）。
+---
 
-不要把 RunPod API key、GitHub PAT、Railway 管理员密码或上传 token 写入本文件或命令输出。
+## 三、线上资源（实际存在的东西）
+
+**Railway**（project `aigirl` / service `video-generator`）：已部署，`H3_ENABLED=1`，
+UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN`（用户 `Andrew3453`
+的 fine-grained token，对 `user/Andrew3453` 有 `repo.write`）。
+`WAN_V2_ENABLED` 仍为 `1`——**故意的**，H3 验证通过前不撤掉可用的 Wan。
+
+**RunPod**：
+
+| 资源 | ID | 备注 |
+| --- | --- | --- |
+| H3 卷（主） | `n7meo4oft2` | US-NC-2 170GB，已灌满 145,443,261,098 字节 |
+| H3 卷（备） | `qextiwmyla` | US-KS-2 170GB，已灌满 145,443,261,107 字节 |
+| H3 模板（旧） | `z2jlkzb9bt` | 挂卷版，指向 `8d5e397` 镜像，**volume-free 后需重建** |
+| LTX 模板 | `km9g8f4guq` | |
+| Wan 模板 | `wjxhc0dtid` | |
+| GHCR 凭据 | `cmtgxws1c003d14njrtc07zd2` | `read:packages` classic PAT |
+
+**当前运行中 Pod：0。** 所有临时/探测 Pod 均已删除。
+
+⚠️ **9 个卷 / 1000GB ≈ $70/月，7×24 计费。** volume-free 跑通后按下面"待清理"处理。
+
+---
+
+## 四、⛔ 未解决：H3 镜像 CI 构建失败
+
+| 提交 | 架构列表 | 缓存 | 构建步骤耗时 | 结果 |
+| --- | --- | --- | --- | --- |
+| `8d5e397` | `12.0` | 有（冷） | **36.9 分钟** | ✅ 成功 |
+| `5c8e6f0` | `8.9;9.0;10.0;12.0` | 有 | 5.9 分钟 | ❌ |
+| `9b75b4f` | 同上 | 有 | 4.3 分钟 | ❌ |
+| `e4522a1` | `8.9;9.0;12.0` | 有 | 8.6 分钟 | ❌ |
+| `8527785` | `8.9;9.0;12.0` | **无** | 4.4 分钟 | ❌ |
+| `13de95d` | `12.0`（退回） | 无 | 进行中 | ? |
+
+**三个被实验推翻的假设，不要重复走**：
+
+1. ~~CUDA 13 floor 缩小了宿主机池~~ —— 去掉 `minCudaVersion`、去掉卷、不限 DC、连
+   community 都试，RTX PRO 6000 照样分不到。**是真缺货，不是过滤条件。**
+2. ~~SM 10.0 不被支持导致失败~~ —— SageAttention v2.2.0 的 `setup.py` 里
+   `SUPPORTED_ARCHS = {8.0, 8.6, 8.9, 9.0, 12.0}` 确实没有 10.0 且会 `raise`，
+   **这是真 bug 必须避开**，但去掉它之后仍然失败。
+3. ~~GHA 层缓存撑爆 runner 磁盘~~ —— 相关性很强（唯一成功的是唯一无缓存的），
+   但移除 `cache-to` 后 4.4 分钟同样失败。**推翻。**
+
+复现 Pod（`lmsysorg/sglang:v0.5.18-cu130`，cpu3c×8，80GB 盘）排除了资源问题：
+80GB 全空、754GB 内存、CUDA 13.0 正常。它自己死在无关的 `git clone` 认证失败
+（`could not read Username for 'https://github.com'`）——**顺带暴露一个待修的脆弱点：
+Dockerfile 用 `pip install git+https://...` 装 SageAttention，网络受限环境会挂。
+改成装固定 commit 的 codeload tarball 可以把 git 从构建路径去掉。**
+
+**下一步要做的第一件事**：拿一个有 `repo` 权限的 GitHub token 读 Actions 日志。
+本机只有 SSH push 凭据（`~/.config/gh` 不存在，keychain 里没有 github.com 条目），
+RunPod 那个 GHCR PAT 只有 `read:packages`，权限不够。没有日志就只能二分猜，
+今天已经因此浪费了四次构建。
+
+---
+
+## 五、架构决策：为什么放弃网络卷
+
+**卷把 Pod 钉死在一个 DC，而那个 DC 没有我们能用的卡。** 实测：
+
+```
+7 张候选卡 × US-NC-2（挂卷）  = 14 次尝试全部 "no instances available"
+7 张候选卡 × US-KS-2（挂卷）
+同样这些卡不挂卷： RTX 5090 → EUR-IS-1 ✅  PRO 4500 → EU-RO-1 ✅  L40S → US-TX-4 ✅
+200GB 容器盘 + 不挂卷：三张卡三个 DC 全部秒建成功 ✅
+```
+
+所以让**便宜的存储去约束昂贵稀缺的 GPU，方向是反的**。volume-free 后：
+
+- 放置范围：任意 DC × 任意合适卡
+- 代价：每次冷启动下 145GB，实测约 5 分钟
+- 对比：Wan 的网络卷加载实测 90–805 秒抽奖，**卷并不更快**
+- 顺带：存储从 $70/月 降到约 $0
+
+`stockStatus` 不能用来判断能否建 Pod——RTX PRO 6000 全程显示 "Low"，14 次全失败。
+**只有真的去建才算数。**
+
+---
+
+## 六、成本口径（更正过的）
+
+2026-08-02 → 09-02 实际账单 `$44.11`：GPU 74%、serverless 附加费 15%、存储 10%、
+容器盘 0.2%。
+
+**但那个存储数字有误导性**——卷是月底才建的。按最后一个完整日 run rate：
+`$1.42/天 ≈ $43/月`（当时 660GB），现在 1000GB ≈ **$70/月**。
+
+`$70/月存储 = 33.5 小时 GPU = 每月 167 个视频（冷启动档）`。
+**除非每月超过 167 个视频，否则存储比 GPU 贵**，而且存储 7×24 无条件计费。
+
+另：**serverless 有约 49% 附加费**（GPU $13.62 + fee $6.67），所以一律走按需 Pod。
+
+---
+
+## 七、延迟问题与保温方案（已设计，未实现）
+
+冷启动预算（基于实测）：建 Pod 0.5 min + 拉镜像 14.3GB 约 2.5 min + 取权重约 5 min
++ 装显存 2–3 min + 推理 0.5–2 min ≈ **每个任务 10 分钟固定开销**。
+
+**核心矛盾不是 GPU 稀缺，是每个任务都开一次性 Pod。**
+
+按 $2.09/h 算，冷启动每个视频白烧 $0.35；一小时做 6 个 = 浪费 $2.10，
+而让 Pod 热着一小时 = $2.09。**超过 2–3 个视频/小时，保温就更划算。**
+
+设计（用户选了 A：纯自动空闲超时）：worker 装完模型后向控制面**轮询**下一个任务
+（复用现有 token 鉴权，不需要给 Pod 开入站端口），空闲 N 分钟后控制面删 Pod。
+建议窗口 10–15 分钟。
+
+---
+
+## 八、10Eros Max（第二个 NSFW 能力，已调研未实现）
+
+`TenStrip/10Eros-Max`（451 likes，比 PinkCherry H3 的 368 高）。
+LTX 代的 `TenStrip/LTX2.3-10Eros` 有 562 likes / 7.9 万下载。
+
+**纠正一个常见误解**：它快是因为 **TURBO 蒸馏被烤进权重**
+（`10Eros_Max_h3_TURBO-hybrid_beta4.safetensors`，元数据 `H3 LoRA merge`），
+**不是因为量化**。int8/nvfp4/GGUF 变体是给 ComfyUI 低显存用户的，我们的 sglang 栈
+自己做在线 FP8，既不需要也读不了那些格式。
+
+**阻塞**：所有 10Eros Max 变体（含 40.22GB 的 bf16）都用**裁剪过的 AdaLN**：
+
+```
+官方/PinkCherry : blocks.N.adaln_proj.linear.weight [96768, 2688]
+10Eros Max      : blocks.N.adaln_proj.linear.weight [96768,    8]
+                + adaln_basis[8,2688] + adaln_mean[2688] + adaln_t_table[1025,8]
+```
+
+sglang v0.5.18 的 H3 DiT 喂进 `adaln_proj` 的是完整 2688 维 `SiLU(t_emb)` 且有形状校验；
+`minimax_h3_adaln_online` 是**按请求预算 AdaLN 的缓存策略**，不是 pruned 格式支持。
+**sglang 装不下。**
+
+**但可离线还原，数学已验证精确**（下载那几个小张量实测
+`max |basis @ basis.T − I| = 0.003`，纯 bf16 舍入噪声，即正交）：
+
+```
+full_W    = pruned_W @ basis          [96768,8] @ [8,2688] → [96768,2688]
+full_bias = pruned_bias − full_W @ mean
+```
+
+产物约 66GB（AdaLN 占 26GB，`66.28 − 40.22 = 26.06` 正好对上），
+传到 `Andrew3453` 的 HF 私有仓库，volume-free worker 直接下载。
+HF token 已在 Railway 变量里，权限够。
+
+---
+
+## 九、下一步顺序
+
+1. **拿 GitHub token**（`repo` 权限）→ 读 Actions 日志 → 确诊构建失败根因
+2. `13de95d` 若构建成功 → 用新 SHA 建 **volume-free 模板**
+   （`ROOT=/models/MiniMax-H3-PinkCherry`、`disk=220`、带 `HF_TOKEN` 和
+   `H3_DOWNLOAD_ON_START=1`，脚本见 scratchpad `mktemplate.py`）
+3. Railway 设 `RUNPOD_H3_POD_NETWORK_VOLUME_ID=`（**留空**）+
+   `RUNPOD_H3_POD_ADDITIONAL_GPU_IDS` + 新模板 ID → 部署
+4. **跑第一次真实出片**（走生产 API，验证回调 / 进度 / 自动删 Pod 三件事）
+5. 成功后：用实测填 `H3_SECONDS_PER_MPIXEL_STEP` 打开 30 分钟超时守卫
+6. 保温（拉取式 worker + 自动空闲超时）
+7. 10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力
+8. 清理：删 9 个卷（省 $70/月）、8 个闲置模板、5 个残留 serverless endpoint。
+   ⚠️ **LTX 的 NE-1 卷 `fn6at7unxa` 不能删**——生产 endpoint `aoma1602mogius`
+   还挂着它，要等 V1 迁到 Pod 链路之后
+9. V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）
+
+---
+
+## 十、别再踩的坑
+
+- 查 RunPod 库存**必须带 `secureCloud:true`**，否则看到的是 community 价和假缺货
+- `stockStatus` 与"能否建 Pod"无关，只有真去建才算数
+- 容量拒绝**零成本**（Pod 没建出来），可以放心重试
+- 下载权重用 **CPU pod**（$0.03/vCPU/h），别用 GPU pod：145GB 约 5 分钟，
+  守护失效跑一天也就几美元，GPU pod 同样疏忽是 $50/天
+- 判断第三方权重能否被 sglang 加载：**HTTP Range 读 safetensors 头部**比对键名和形状，
+  零成本且确定。带 `comfy_quant` 张量的是 ComfyUI 量化，sglang 加载不了
+- turbo LoRA 的步数是**名字 +1**（4 步档用 5、8 步档用 9），flow schedule 需要 N+1 个 sigma
+- 不要把 API key、PAT、上传 token 写进文件或命令输出
