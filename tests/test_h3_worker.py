@@ -297,3 +297,12 @@ def test_h3_smoke_failure_callback_carries_the_worker_log_tail() -> None:
     assert "--- worker log tail ---" in source
     # Tee is wired up before the handler runs, so the child's output is captured.
     assert source.index("_tee_process_output()\n") < source.index('handler({"id": "h3-pod-smoke"')
+
+
+def test_h3_handler_trusts_the_pinned_snapshot_code_and_takes_template_overrides() -> None:
+    """The FL2VA VAEs and encoder are custom-code modules; load-time knobs must not need a rebuild."""
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert '"trust_remote_code": True' in source
+    assert 'os.getenv("H3_EXTRA_SERVER_ARGS_JSON", "")' in source
+    # Overrides land after every built-in kwarg so a template can win any argument.
+    assert source.index("kwargs.update(overrides)") < source.index("DiffGenerator.from_pretrained(**kwargs)")

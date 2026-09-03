@@ -322,3 +322,24 @@ sglang 只在 `KNOWN_NON_DIFFUSERS_DIFFUSION_MODEL_PATTERNS` 里按路径含 `mi
 
 顺手：`smoke.py` 用 `tee` 把整个进程树的 stdout/stderr 镜像到 `/tmp/h3-worker.log`，
 失败回调的 `error` 末尾附最后 3000 字符，以后子进程崩溃不用再起复现 Pod。
+
+### 第二次真实出片（2026-09-03 02:59Z，Pod `qw6mhpjixazetg`，US-KS-2）
+
+`model_path` 修复生效，加载走到了组件层；新的日志尾部机制也生效，失败回调直接带回
+traceback，没再起复现 Pod。这次的失败：
+
+```
+ValueError: The repository for /models/MiniMax-H3-PinkCherry/FL2VA/audio_vae contains custom code.
+Pass `trust_remote_code=True` to allow loading remote code modules.
+```
+
+FL2VA 分区的 VAE / 文本编码器是自定义代码模块（镜像里 diffusers 0.32.2 没有 H3 类），
+sglang 的组件加载器经 diffusers `AutoModel.from_pretrained` 加载，必须 `trust_remote_code=True`。
+快照 revision 固定，信任的是审过的那份代码。
+
+顺手加了 `H3_EXTRA_SERVER_ARGS_JSON`（模板 env，JSON 对象），最后合并进
+`DiffGenerator.from_pretrained` 的参数并覆盖内置值——**以后加载参数级的调整只改模板，
+不用再等 13 分钟镜像构建**。
+
+另一个观察：US-KS-2 上容器 9 分钟才起来（拉 14GB 镜像），US-NC-1 只要约 1 分钟。
+30 分钟守卫下这仍够用，但保温方案（第七节）的价值又高了一截。

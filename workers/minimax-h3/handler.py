@@ -265,6 +265,13 @@ def _generator() -> DiffGenerator:
             "model_path": str(PIPELINE_ROOT),
             "pipeline_class_name": PIPELINE_CLASS_NAME,
             "model_variant": MODEL_VARIANT,
+            # The FL2VA partition ships its VAEs and the Qwen3-VL encoder as
+            # custom-code modules: the image's diffusers 0.32.2 has no MiniMax
+            # H3 classes, so SGLang's component loader reaches them through
+            # diffusers' AutoModel, which refuses remote code unless told. The
+            # second real run died here. The snapshot revision is pinned, so
+            # the code being trusted is the reviewed one.
+            "trust_remote_code": True,
             "num_gpus": 1,
             "attention_backend": ATTENTION_BACKEND,
             "pin_cpu_memory": True,
@@ -276,6 +283,15 @@ def _generator() -> DiffGenerator:
             kwargs["quantization"] = QUANTIZATION
         if NSFW_TRANSFORMER_ENABLED:
             kwargs["transformer_weights_path"] = str(NSFW_TRANSFORMER)
+        # Every load-time knob so far cost an image rebuild to try. Extra
+        # ServerArgs fields can be supplied from the Pod template instead;
+        # they are applied last and win over everything above.
+        extra = os.getenv("H3_EXTRA_SERVER_ARGS_JSON", "").strip()
+        if extra:
+            overrides = json.loads(extra)
+            if not isinstance(overrides, dict):
+                raise RuntimeError("H3_EXTRA_SERVER_ARGS_JSON must be a JSON object")
+            kwargs.update(overrides)
         generator = DiffGenerator.from_pretrained(**kwargs)
         if TURBO_LORA_ENABLED:
             lora_kwargs: dict[str, Any] = {
