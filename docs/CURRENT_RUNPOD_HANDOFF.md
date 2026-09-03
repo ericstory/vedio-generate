@@ -2,16 +2,17 @@
 
 ## 当前状态一句话
 
-**MiniMax H3 + PinkCherry 主线已经真实出片成功**（2026-09-03 05:14Z，第八次尝试）：
-1344×768、5 秒、24fps、32kHz 立体声，走生产 API 全流程——volume-free 放置、开机下权重、
-进度/结果回调、上传、自动删 Pod。Pod 全程 504 秒约 $0.29，推理 108 秒，峰值显存 45.6GB。
+**MiniMax H3 + PinkCherry 主线已经两次真实出片成功**（第八次 05:14Z、第九次 07:06Z），
+1344×768、5 秒、24fps、32kHz 立体声，走生产 API 全流程。
+**第九次是新形态**：web 提交 0.65 秒返回，守卫循环 5.1 秒拿到 Pod，
+提交到成片 482 秒；模板 `jkrh512m3s` 用最新镜像 `5a869e1`、**不带任何 env 覆盖**，
+峰值显存 45,616 MB 与第八次完全一致（代码默认值 = 模板覆盖，5c 验毕）；
+超时守卫已打开（`H3_SECONDS_PER_MPIXEL_STEP=0.1`，投影 111.5 秒 vs 实测 108.5 秒）。
 
-前七次失败全部是 sglang 加载契约的细节（第十二节逐条记录，每条都已修进代码），
-链路本身从第一次起就是好的。**现役模板 `02hdqp64b1`**（镜像 `627dded` + 模板 env 覆盖）；
-代码里的默认值已全部对齐到这套配置（最新提交 `5a869e1`），但**那份镜像还没在生产跑过**，
-下一次建模板用最新 SHA 时把 `mktemplate.py` 里的 `H3_EXTRA_SERVER_ARGS_JSON` 去掉再验一次。
+前七次失败全部是 sglang 加载契约的细节（第十二节逐条记录，每条都已修进代码）。
+web 端「点一次就稳」靠的是第十三节的入队 + 守卫循环申请 GPU（提交 `79dec8f`）。
 
-**下一步：第九节第 5 步起。**
+**下一步：第九节第 5b（显存余量调常驻层数）或第 6 步（保温）起。**
 
 ---
 
@@ -61,7 +62,10 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 的 fine-grained token，对 `user/Andrew3453` 有 `repo.write`）。
 `WAN_V2_ENABLED` 仍为 `1`——**故意的**，H3 验证通过前不撤掉可用的 Wan。
 
-2026-09-02 已切到 volume-free：`RUNPOD_H3_POD_TEMPLATE_ID=5hwjktbaa2`；
+2026-09-03 现役模板 `RUNPOD_H3_POD_TEMPLATE_ID=jkrh512m3s`（见第十三节）；
+`RUNPOD_COST_GUARD_ENABLED=1` **现在是硬依赖**——守卫循环负责给排队任务申请 Pod，
+关掉它 web 端的 H3/Wan 任务会退回到请求内同步建 Pod 的老路径。
+2026-09-02 已切到 volume-free：
 `RUNPOD_H3_POD_NETWORK_VOLUME_ID` **已删除**（Railway CLI 不接受空值，
 未设置在代码里等价于空）；`RUNPOD_H3_POD_ADDITIONAL_GPU_IDS` 是 `gpu_policy.json`
 第 2–5 位（PRO 6000 Workstation、PRO 5000、5090、PRO 4500）。
@@ -74,8 +78,9 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 | --- | --- | --- |
 | H3 卷（主） | `n7meo4oft2` | US-NC-2 170GB，已灌满 145,443,261,098 字节 |
 | H3 卷（备） | `qextiwmyla` | US-KS-2 170GB，已灌满 145,443,261,107 字节 |
-| **H3 模板（现役）** | `5hwjktbaa2` | volume-free，`d5dd9d5` 镜像，220GB 容器盘，`H3_DOWNLOAD_ON_START=1`，无 `HF_HUB_OFFLINE` |
-| H3 模板（旧） | `z2jlkzb9bt` | 挂卷版，指向 `8d5e397` 镜像，已被替换、待清理 |
+| **H3 模板（现役）** | `jkrh512m3s` | volume-free，`5a869e1` 镜像，220GB 容器盘，**无 `H3_EXTRA_SERVER_ARGS_JSON`、无 `H3_LORA_MERGE_MODE`**（全靠代码默认值），`H3_SECONDS_PER_MPIXEL_STEP=0.1` |
+| H3 模板（上一版） | `02hdqp64b1` | `627dded` 镜像 + env 覆盖，第八次成功用的；`jkrh512m3s` 验过后可删 |
+| H3 模板（更早） | `5hwjktbaa2` `sx4pndyt2r` `kdf3q6n3i4` `v3waitxptu` `7xnj6d52vv` `lpalzoy70e` `z2jlkzb9bt` | 迭代残留，可删 |
 | LTX 模板 | `km9g8f4guq` | |
 | Wan 模板 | `wjxhc0dtid` | |
 | GHCR 凭据 | `cmtgxws1c003d14njrtc07zd2` | `read:packages` classic PAT |
@@ -239,17 +244,18 @@ HF token 已在 Railway 变量里，权限够。
 2. ~~用新 SHA 建 volume-free 模板~~ ✅ `5hwjktbaa2`
 3. ~~Railway 变量 + 部署~~ ✅ `e654ad7c`
 4. ~~跑第一次真实出片~~ ✅ 2026-09-03 05:14Z 成功（第八次，第十二节）
-5. 用实测填 `H3_SECONDS_PER_MPIXEL_STEP` 打开超时守卫：实测 108.4 秒 ÷（1.032 MP × 120 帧 × 9 步）
-   = **0.097 s/(MP·帧·步)**，建议填 `0.1`（768p 15 秒 360 帧投影 324 秒，远在 1500 秒预算内）。
-   模板 env 和 `mktemplate.py` 里都还是 `0`
+5. ~~用实测填 `H3_SECONDS_PER_MPIXEL_STEP` 打开超时守卫~~ ✅ 2026-09-03 模板 `jkrh512m3s`
+   填 `0.1`（实测 108.4 秒 ÷（1.032 MP × 120 帧 × 9 步）= 0.097 s/(MP·帧·步)；
+   768p 15 秒 360 帧投影 324 秒，远在 1500 秒预算内）
 5b. 显存还有 50GB 余量（峰值 45.6 / 95），`dit_layerwise_resident_layers` 可以从 25 往 40 提，
-   每提一层少流一层权重；每次改完看返回的 `peak_memory_mb`
-5c. 用最新 SHA 的镜像（`5a869e1`，默认值已含全部修复）建一个**不带**
-   `H3_EXTRA_SERVER_ARGS_JSON` 的模板验一次，确认代码默认值等价于模板覆盖
+   每提一层少流一层权重；每次改完看返回的 `peak_memory_mb`。**没动**，
+   留给下一轮单独调（和 5c 混在一起就分不清是谁的功劳）
+5c. ~~用最新 SHA 的镜像建一个不带 `H3_EXTRA_SERVER_ARGS_JSON` 的模板验一次~~ ✅ 见第十三节
+5d. ~~web 端稳定创建任务：提交先入队、守卫循环申请 GPU~~ ✅ 提交 `79dec8f`，见第十三节
 6. 保温（拉取式 worker + 自动空闲超时）
 7. 10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力
-8. 清理：删 9 个卷（省 $70/月）、闲置模板（今天迭代留下的 `5hwjktbaa2`、`sx4pndyt2r`、
-   `kdf3q6n3i4`、`v3waitxptu`、`7xnj6d52vv`、`lpalzoy70e` 都可删，**现役是 `02hdqp64b1`**）、
+8. 清理：删 9 个卷（省 $70/月）、闲置模板（迭代留下的 `5hwjktbaa2`、`sx4pndyt2r`、
+   `kdf3q6n3i4`、`v3waitxptu`、`7xnj6d52vv`、`lpalzoy70e`、`02hdqp64b1` 都可删，**现役是 `jkrh512m3s`**）、
    5 个残留 serverless endpoint。
    ⚠️ **LTX 的 NE-1 卷 `fn6at7unxa` 不能删**——生产 endpoint `aoma1602mogius`
    还挂着它，要等 V1 迁到 Pod 链路之后
@@ -470,3 +476,74 @@ handler 的报告字段，实际生效的是模板覆盖的 `memory`；新代码
 5. 单卡 96GB 不能全常驻：`layerwise_offload_components=["dit","text_encoder","vae"]`，
    `dit_layerwise_resident_layers=25`（可上调），`dit_offload_prefetch_size=2`，`performance_mode="memory"`
 6. 传给 `from_kwargs` 的每个键都算显式设置（含 null），别指望 auto
+
+---
+
+## 十三、2026-09-03：web 端稳定创建任务（提交 `79dec8f`）
+
+**问题**：浏览器点「开始生成」时，控制面在 HTTP 请求里同步跟 RunPod 抢容量
+（3 轮 × 5 种 GPU = 15 次 POST，中间两次 5 秒 sleep，全部跑在事件循环上），
+抢不到就给用户一个 503「云 GPU 当前无可用机器」，用户只能再点一次。
+RTX PRO 6000 secure 库存薄到一次尝试经常输（上一会话的 `smoke_submit.py`
+要重试 40 次才敢说稳）。这段时间 healthz、任务列表轮询、Pod 回调全部被阻塞。
+
+**改法（Pod 链路 H3 和 Wan 都适用）**：
+
+- `POST /api/tasks` 对 Pod 链路只**落库**（`status=queued`、`provider_task_id=''`、
+  `progress.stage=awaiting_gpu`）就返回 201，实测 0.65 秒。
+- 已有的成本守卫循环（每 8 秒一 tick，`asyncio.to_thread` 里跑）多了一步
+  `_acquire_pending_pods`：给每个排队任务做**一轮** lane sweep（`capacity_retry_sweeps=1`），
+  最快 `RUNPOD_*_POD_ACQUIRE_RETRY_SECONDS`（默认 20 秒）一次，
+  超过 `RUNPOD_*_POD_ACQUIRE_TIMEOUT_SECONDS`（默认 900 秒）就把任务置为 failed，
+  错误文案明确写「本次未创建 Pod，不产生费用」。容量拒绝和 API 抖动
+  （无状态码 / 429 / 5xx）都继续等；401、价格超上限这类不会自愈的错误立即失败。
+- 拿到 Pod 后 `provider_metadata` 记 `pod_created_at`、`gpu_wait_seconds`、
+  `gpu_acquire_attempts`；**30 分钟运行上限从 `pod_created_at` 起算**，不再从点击起算
+  （否则排队 10 分钟的任务只剩 20 分钟给 Pod）。
+- 任务表新增 `generate_audio` 列（守卫循环重放提交时要用）；
+  启动时那句 `provider_task_id='' → id` 的回填**只对非 Pod 链路生效**，
+  否则重启一次排队任务就会被当成「Pod 不见了」标成 expired。
+- 任务列表接口不再去查还没有 Pod 的任务，其余 provider 轮询和同步提交
+  （Seedance、LTX serverless）也挪到线程里，事件循环不再被阻塞。
+- 前端：H3 归入 `selfHostedModels`（参考图置灰、1080p 禁用），768p 只在 H3 可选且为默认；
+  新增阶段文案 `awaiting_gpu`（带已申请次数）、`pod_created`、`gpu_probe`、
+  `model_download_start/done`；`model_load_done` 改成「模型就绪，视频推理中」
+  （worker 在推理期间不发阶段回调，旧文案会让人以为卡住）。
+
+**边界**：`RUNPOD_COST_GUARD_ENABLED=1` 现在是硬依赖——守卫循环就是申请器；
+关掉它 `create_task` 会退回请求内同步建 Pod 的老路径（测试里默认就是这个模式）。
+容器重启不丢排队任务（状态在 SQLite 里，守卫循环重启后接着申请）。
+一个 Pod 链路同时只允许一个未完成任务，排队中的也算，第二次提交仍是 429。
+
+**验证**：98 个测试全过（新增 8 个：入队不碰 provider、守卫循环拿 Pod、
+容量拒绝持续等待并超时失败、非瞬时错误立即失败、运行上限按 Pod 创建时间算、
+重启不回填排队任务、前端 H3 联动、单轮 sweep 选项）。
+Railway 部署 `a9e92219`（2026-09-02 23:57 PT）。浏览器里确认：任务列表模型名正确、
+详情页显示「云 GPU 已分配，正在启动」等阶段文案、切到 H3 时清晰度自动 768p、
+参考图置灰、音效开关可用（Chrome 扩展在最后一步断线，没拿到「已完成」的截图）。
+
+### 第九次真实出片（2026-09-03 06:58Z，Pod `wga7opfmwd53cy`，US-NC-1）：✅ 成功
+
+任务 `440b7e0d`，模板 `jkrh512m3s`（镜像 `5a869e1`，无 `H3_EXTRA_SERVER_ARGS_JSON`、
+无 `H3_LORA_MERGE_MODE`，`H3_SECONDS_PER_MPIXEL_STEP=0.1`）。通过生产 API 提交
+（`smoke_submit.py`，和网页表单打同一个接口）。
+
+| 阶段 | 实测 |
+| --- | --- |
+| `POST /api/tasks` 返回 | **0.65 秒**（status=queued，无 Pod） |
+| 守卫循环拿到 Pod | 提交后 5.1 秒，第 1 次申请即成功 |
+| 建 Pod → 容器起来 | 约 2.5 分钟（US-NC-1，新镜像没缓存，要拉 14GB） |
+| 下权重 145GB | 77.8 秒 |
+| 模型加载（FP8、PinkCherry、动态 LoRA） | 134.0 秒 |
+| 推理 1344×768 × 120 帧 × 9 步 + 音频 | **108.5 秒**（守卫投影 111.5 秒，高 3%） |
+| 上传 | 0.2 秒 |
+| 提交 → 成片 | **482 秒** |
+| 峰值显存 | **45,616 MB**（第八次 45.6 GB，完全一致） |
+
+输出 `/generate/media/abd10ab2-3ff4-4b76-9529-ac4b7e771271.mp4`，seed 4086825481，
+`verified_configuration=true`，有音频。结果回调后控制面立刻删 Pod，RunPod 当前运行中 Pod：0。
+元数据新增 `pod_created_at`、`gpu_wait_seconds=5.1`、`gpu_acquire_attempts=1`、
+`projected_denoise_seconds=111.5`。
+
+**没验到的**：容量拒绝的排队路径（这次第一次就拿到了 Pod）。单元测试覆盖了它，
+线上要等真的缺货才看得到「正在申请云 GPU 机器（已申请 n 次）」。
