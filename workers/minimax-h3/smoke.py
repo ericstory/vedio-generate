@@ -2,11 +2,49 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import httpx
 
 from handler import handler
+
+
+WORKER_LOG = Path(os.environ.get("H3_WORKER_LOG", "/tmp/h3-worker.log"))
+
+
+def _tee_process_output() -> None:
+    """Mirror this process tree's stdout/stderr into a file.
+
+    SGLang loads the model in a spawned scheduler process. When that child dies
+    the parent only sees a bare EOFError off the pipe, and RunPod discards the
+    container log together with the one-shot Pod -- so the first real run's
+    failure had to be reproduced on a second Pod just to read the traceback.
+    Spawned children inherit fds 1 and 2, so routing both through `tee` keeps the
+    container log intact while giving the failure callback something to quote.
+    """
+    try:
+        tee = subprocess.Popen(["tee", "-a", str(WORKER_LOG)], stdin=subprocess.PIPE)
+    except OSError:
+        return
+    assert tee.stdin is not None
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.dup2(tee.stdin.fileno(), 1)
+    os.dup2(tee.stdin.fileno(), 2)
+
+
+def _log_tail(limit: int = 3000) -> str:
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Give tee a moment to drain what the dying child wrote.
+        time.sleep(1)
+        return WORKER_LOG.read_bytes()[-limit:].decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 def _post_result(payload: dict) -> bool:
@@ -46,14 +84,19 @@ def main() -> None:
     if not raw_input:
         raise RuntimeError("SMOKE_INPUT_JSON is required")
     params = json.loads(raw_input)
+    _tee_process_output()
     try:
         result = handler({"id": "h3-pod-smoke", "input": params})
     except Exception as exc:
+        error = f"{type(exc).__name__}: {str(exc)[:500]}"
+        tail = _log_tail()
+        if tail:
+            error = f"{error}\n--- worker log tail ---\n{tail}"
         if _post_result(
             {
                 "status": "failed",
                 "content": {},
-                "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                "error": error,
             }
         ):
             print(json.dumps({"event": "pod_callback_complete", "status": "failed"}), flush=True)

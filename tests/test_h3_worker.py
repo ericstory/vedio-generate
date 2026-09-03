@@ -265,3 +265,35 @@ def test_h3_image_does_not_disturb_the_base_huggingface_hub() -> None:
     # The Python API ships with SGLang's own dependency; the CLI does not.
     assert "from huggingface_hub import snapshot_download" in source
     assert "hf download" not in source
+
+
+def test_h3_handler_hands_sglang_the_snapshot_root_not_the_partition() -> None:
+    """SGLang appends the FL2VA partition itself; pointing model_path at it doubled it.
+
+    MiniMaxH3Pipeline (SGLang v0.5.18) forces model_subfolder from model_variant and
+    joins it onto model_path, so the first real run died inside the spawned scheduler
+    with `.../FL2VA/FL2VA does not contain model_index.json` and surfaced only as a
+    bare EOFError. The repository's root model_index.json names the diffusers Modular
+    class SGLang has no entry for, so the native pipeline class is named explicitly.
+    """
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert "PIPELINE_ROOT = BASE_MODEL_ROOT.parent" in source
+    assert '"model_path": str(PIPELINE_ROOT)' in source
+    assert '"model_path": str(BASE_MODEL_ROOT)' not in source
+    assert '"pipeline_class_name": PIPELINE_CLASS_NAME' in source
+    assert 'PIPELINE_CLASS_NAME = "MiniMaxH3Pipeline"' in source
+    assert '"model_variant": MODEL_VARIANT' in source
+    # The partition directory name is part of SGLang's contract, so a misconfigured
+    # H3_BASE_MODEL_ROOT fails loudly before any weights are touched.
+    assert 'BASE_MODEL_ROOT.name != "FL2VA"' in source
+
+
+def test_h3_smoke_failure_callback_carries_the_worker_log_tail() -> None:
+    """A dead scheduler child must not cost a second Pod just to read its traceback."""
+    source = (WORKER_ROOT / "smoke.py").read_text(encoding="utf-8")
+    assert '["tee", "-a", str(WORKER_LOG)]' in source
+    assert "os.dup2(tee.stdin.fileno(), 1)" in source
+    assert "os.dup2(tee.stdin.fileno(), 2)" in source
+    assert "--- worker log tail ---" in source
+    # Tee is wired up before the handler runs, so the child's output is captured.
+    assert source.index("_tee_process_output()\n") < source.index('handler({"id": "h3-pod-smoke"')

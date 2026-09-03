@@ -1,18 +1,13 @@
-# RunPod 链路交接记录（2026-09-02 更新）
+# RunPod 链路交接记录（2026-09-03 更新）
 
 ## 当前状态一句话
 
-MiniMax H3 主线的代码、控制面、模型权重、Railway 部署全部就位，UI 里能选到 H3，
-**但从未成功出过一次片**。
+**第一次真实出片已经跑过一次（2026-09-03 02:13Z），链路本身全部打通**：volume-free
+放置、开机下权重、进度回调、结果回调、自动删 Pod 都验证成功。失败点只有一个，
+`model_path` 传错（详见第十二节），修复已提交，正在等新镜像。
 
-曾经卡住一整天的 CI 构建**根因已确诊并修复**（huggingface_hub 升级破坏了
-SageAttention 的元数据生成，详见第四节）。修复提交 `d5dd9d5` 的构建在写下这段时
-已跑过 5.4 分钟——远超之前 8 秒就挂的失败点——但**尚未确认成功**。
-
-GPU 可用性问题已经设计并实现了解决方案（volume-free，任意 DC × 任意合适卡），
-但因为一直没有可用镜像，**整条链路未经端到端验证**。
-
-**下一个会话的第一件事：确认 `d5dd9d5` 的镜像构建结果，然后按第九节往下走。**
+**下一个会话的第一件事：用修复后的镜像 SHA 建模板、改 Railway 模板 ID、重跑
+`smoke_submit.py`。** 本机到 Railway 边缘的网络时好时坏（第十一节），提交脚本已带重试。
 
 ---
 
@@ -62,13 +57,21 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 的 fine-grained token，对 `user/Andrew3453` 有 `repo.write`）。
 `WAN_V2_ENABLED` 仍为 `1`——**故意的**，H3 验证通过前不撤掉可用的 Wan。
 
+2026-09-02 已切到 volume-free：`RUNPOD_H3_POD_TEMPLATE_ID=5hwjktbaa2`；
+`RUNPOD_H3_POD_NETWORK_VOLUME_ID` **已删除**（Railway CLI 不接受空值，
+未设置在代码里等价于空）；`RUNPOD_H3_POD_ADDITIONAL_GPU_IDS` 是 `gpu_policy.json`
+第 2–5 位（PRO 6000 Workstation、PRO 5000、5090、PRO 4500）。
+`RUNPOD_H3_POD_DATA_CENTER_ID` / `FALLBACK_*` 还留着，但卷为空时代码不读它们。
+部署 `e654ad7c`（07:27 PT）SUCCESS，容器日志显示 Uvicorn 正常启动，公网 healthz 200。
+
 **RunPod**：
 
 | 资源 | ID | 备注 |
 | --- | --- | --- |
 | H3 卷（主） | `n7meo4oft2` | US-NC-2 170GB，已灌满 145,443,261,098 字节 |
 | H3 卷（备） | `qextiwmyla` | US-KS-2 170GB，已灌满 145,443,261,107 字节 |
-| H3 模板（旧） | `z2jlkzb9bt` | 挂卷版，指向 `8d5e397` 镜像，**volume-free 后需重建** |
+| **H3 模板（现役）** | `5hwjktbaa2` | volume-free，`d5dd9d5` 镜像，220GB 容器盘，`H3_DOWNLOAD_ON_START=1`，无 `HF_HUB_OFFLINE` |
+| H3 模板（旧） | `z2jlkzb9bt` | 挂卷版，指向 `8d5e397` 镜像，已被替换、待清理 |
 | LTX 模板 | `km9g8f4guq` | |
 | Wan 模板 | `wjxhc0dtid` | |
 | GHCR 凭据 | `cmtgxws1c003d14njrtc07zd2` | `read:packages` classic PAT |
@@ -80,6 +83,11 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 ---
 
 ## 四、✅ 已确诊并修复：H3 镜像 CI 构建失败
+
+**2026-09-02 已确认修复有效**：Actions run `33639454654` 成功，全程 13 分钟；
+SageAttention 2.2.0 在 SM 12.0 上编译 386 秒，`import sageattention` 通过，
+镜像 `ghcr.io/ericstory/papa-minimax-h3:d5dd9d58f306769c0dceff687773ea7d00bbfbcf`
+已推送（GHCR 包**可匿名拉取**，查 tag 不需要 token）。
 
 **根因**（2026-09-02，拿到能读 Actions 日志的 GitHub token 后一次定位）：
 
@@ -223,13 +231,12 @@ HF token 已在 Railway 变量里，权限够。
 
 ## 九、下一步顺序
 
-1. **确认 `d5dd9d5` 构建成功**（失败就再读日志，方法见第四节）
-2. 用新 SHA 建 **volume-free 模板**
-   （`ROOT=/models/MiniMax-H3-PinkCherry`、`disk=220`、带 `HF_TOKEN` 和
-   `H3_DOWNLOAD_ON_START=1`，脚本见 scratchpad `mktemplate.py`）
-3. Railway 设 `RUNPOD_H3_POD_NETWORK_VOLUME_ID=`（**留空**）+
-   `RUNPOD_H3_POD_ADDITIONAL_GPU_IDS` + 新模板 ID → 部署
-4. **跑第一次真实出片**（走生产 API，验证回调 / 进度 / 自动删 Pod 三件事）
+1. ~~确认 `d5dd9d5` 构建成功~~ ✅ 2026-09-02，见第四节
+2. ~~用新 SHA 建 volume-free 模板~~ ✅ `5hwjktbaa2`
+3. ~~Railway 变量 + 部署~~ ✅ `e654ad7c`
+4. ~~跑第一次真实出片~~ 已跑，回调 / 进度 / 自动删 Pod 三件事全部验证通过，
+   出片本身因 `model_path` 失败，已修（第十二节）。**重跑**：新镜像 → `mktemplate.py <sha>`
+   → Railway `RUNPOD_H3_POD_TEMPLATE_ID` → `smoke_submit.py`
 5. 成功后：用实测填 `H3_SECONDS_PER_MPIXEL_STEP` 打开 30 分钟超时守卫
 6. 保温（拉取式 worker + 自动空闲超时）
 7. 10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力
@@ -251,3 +258,67 @@ HF token 已在 Railway 变量里，权限够。
   零成本且确定。带 `comfy_quant` 张量的是 ComfyUI 量化，sglang 加载不了
 - turbo LoRA 的步数是**名字 +1**（4 步档用 5、8 步档用 9），flow schedule 需要 N+1 个 sigma
 - 不要把 API key、PAT、上传 token 写进文件或命令输出
+- Railway CLI `variable set` **不接受空值**（`KEY=` 报 Invalid variable format）；
+  要清空就 `variable delete`，它没有 `--skip-deploys`，会触发一次旧镜像重部署，
+  紧接着 `railway up --detach` 覆盖即可
+- `railway up` 部署的是本地目录，不是 git；部署前确认 `git status` 干净
+- RunPod `GET /v2/pods/{id}/logs` 是 **SSE 流**（`tail=5000&source=container`），
+  不能一次性 `read()`，要按行读、靠 socket 超时收尾；`repro_pod.py` 有可用实现
+- 一次性 Pod 失败后日志随 Pod 一起没了。要抓子进程 traceback，别再起复现 Pod：
+  `smoke.py` 现在把容器日志尾部附进失败回调的 `error` 里
+
+## 十一、2026-09-02 本机访问 Railway 被阻断（第一次出片因此没跑）
+
+**现象**：`curl` / Python urllib / `nc` 到 `69.46.46.34:443`（Railway 边缘，
+`RLWY-HIKARI-01`）全部连接超时；`railway.com`、另一个 Railway 服务
+`aigirl-server-production.up.railway.app`（`69.46.46.59`）同样不通；traceroute
+过 Cogent（`154.54.167.x`）之后全是 `*`。GitHub、RunPod API、hackertarget 都正常。
+无系统代理，无 IPv6。
+
+**公网视角正常**：`api.hackertarget.com/httpheaders` 探 healthz 得
+`HTTP/1.1 200 OK`，`x-railway-edge: iad1`。所以 RunPod Pod 的回调和上传不受影响，
+只是从这台 Mac mini 提交不了任务。
+
+**试过且不通的绕路**（下次别再花时间）：
+- WebFetch 沙箱对该网段返回 `ECONNREFUSED`——它自己拦的，**不能当外部视角用**
+- `railway ssh -- …`（在容器内打 127.0.0.1:8000）、SSH 到 MacBook 借出口：
+  都被 Claude Code 自动模式的分类器拦截，需要用户手动放行或自己跑
+- Chrome 扩展未连接
+- tailnet 有出口节点（`office-mesh-prod-us-node-pve-0624`），切出口节点是
+  全机网络变更，未擅自动
+
+**恢复后直接做**：`python3 smoke_submit.py`（本会话 scratchpad：
+`/private/tmp/claude-501/-Users-macmini-workspace-papa/871d013a-9993-4f9a-8dcf-3e70de00eb1b/scratchpad/`，
+同目录还有 `mktemplate.py`、`pods.py`；scratchpad 是临时目录，可能被清）。
+
+## 十二、第一次真实出片（2026-09-03 02:13Z）：链路全通，倒在 model_path
+
+**验证通过的**（Pod `m8sp9v8w1x3ors`，RTX PRO 6000 Server，$2.09/h，US-NC-1）：
+
+- volume-free 放置：落在 **US-NC-1**，一个我们从没放过卷的机房，第一次尝试就成功
+- 开机下权重：`model_download_start` → `model_download_done` 在 4 分钟内完成
+  （建 Pod 02:13:52 → `model_load_start` 02:18:00，含拉镜像）
+- 进度回调 3 次、结果回调 1 次全部 200；结果回调后控制面**立刻删 Pod**（存活 234 秒）
+- 全程费用约 $0.14
+
+**失败**：`EOFError: `（空消息），发生在 `model_load_start` 后 22 秒。空消息是因为
+sglang 的调度器在 spawn 的子进程里加载模型，子进程崩了父进程只从管道拿到裸 EOFError。
+起了一个不带回调的复现 Pod（`rti6qrqvvibt4c`，322 秒，$0.19）读容器日志才拿到真因：
+
+```
+ValueError: Model directory /models/MiniMax-H3-PinkCherry/FL2VA/FL2VA does not contain model_index.json
+```
+
+sglang v0.5.18 的 `MiniMaxH3Pipeline` **自己**把 `model_variant=fl2va` 映射成子目录 `FL2VA`
+再拼到 `model_path` 后面（`default_model_subfolder = "FL2VA"`，`_load_config` 里强制
+`model_subfolder`）。我们把 `model_path` 指到分区目录，就成了 `FL2VA/FL2VA`。
+
+**修复**（本次提交）：`model_path` 改为快照根 `/models/MiniMax-H3-PinkCherry`，并显式传
+`pipeline_class_name="MiniMaxH3Pipeline"`——因为 HF 仓库根目录的 `model_index.json` 声明的
+是 diffusers 的 `MiniMaxH3ModularPipeline`，sglang 注册表里没有，靠它选类会失败；
+sglang 只在 `KNOWN_NON_DIFFUSERS_DIFFUSION_MODEL_PATTERNS` 里按路径含 `minimaxai/minimax-h3`
+匹配，本地路径不含所以也走不到。`H3_BASE_MODEL_ROOT` 仍指分区目录，只用来检查文件是否齐；
+`handler` 会校验它的目录名必须是 `FL2VA`。
+
+顺手：`smoke.py` 用 `tee` 把整个进程树的 stdout/stderr 镜像到 `/tmp/h3-worker.log`，
+失败回调的 `error` 末尾附最后 3000 字符，以后子进程崩溃不用再起复现 Pod。

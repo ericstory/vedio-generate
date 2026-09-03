@@ -35,6 +35,20 @@ MODEL_ROOT = Path(os.getenv("MODEL_ROOT", "/runpod-volume/models/MiniMax-H3-Pink
 # last-frame conditioning, so one partition covers the whole product surface.
 BASE_MODEL_ROOT = Path(os.getenv("H3_BASE_MODEL_ROOT", str(MODEL_ROOT / "FL2VA")))
 MODEL_VARIANT = os.getenv("H3_MODEL_VARIANT", "fl2va")
+# SGLang wants the *snapshot root* as model_path, never the partition. Its
+# MiniMaxH3Pipeline (v0.5.18, minimax_h3_pipeline.py) maps model_variant to the
+# partition directory itself -- `default_model_subfolder = "FL2VA"`, and
+# `_load_config` forces model_subfolder from the variant -- then joins it onto
+# model_path. Handing it the partition produced `.../FL2VA/FL2VA does not
+# contain model_index.json` inside the spawned scheduler, which the parent only
+# saw as a bare EOFError. That was the first real run's failure.
+PIPELINE_ROOT = BASE_MODEL_ROOT.parent
+# The registry key SGLang resolves --pipeline-class-name against. Named
+# explicitly because the repository's root model_index.json declares the
+# diffusers `MiniMaxH3ModularPipeline`, which SGLang has no entry for; only the
+# partition's own index names the native pipeline, and SGLang never reads that
+# one when choosing the class.
+PIPELINE_CLASS_NAME = "MiniMaxH3Pipeline"
 # PinkCherry ships a full fine-tuned DiT, not an adapter. Its tensor names and
 # shapes are identical to the stock FL2VA transformer, so SGLang loads it
 # through the single-file transformer override and every other component stays
@@ -219,6 +233,11 @@ def _generator() -> DiffGenerator:
     global _GENERATOR
     if _GENERATOR is None:
         _require_models()
+        if BASE_MODEL_ROOT.name != "FL2VA":
+            raise RuntimeError(
+                "H3_BASE_MODEL_ROOT must point at the FL2VA partition inside the "
+                f"snapshot root, got {BASE_MODEL_ROOT}"
+            )
         if ATTENTION_BACKEND == "sage_attn":
             # SGLang silently falls back to a different backend when
             # sageattention is missing, and that fallback is unreliable on
@@ -243,7 +262,8 @@ def _generator() -> DiffGenerator:
             flush=True,
         )
         kwargs: dict[str, Any] = {
-            "model_path": str(BASE_MODEL_ROOT),
+            "model_path": str(PIPELINE_ROOT),
+            "pipeline_class_name": PIPELINE_CLASS_NAME,
             "model_variant": MODEL_VARIANT,
             "num_gpus": 1,
             "attention_backend": ATTENTION_BACKEND,
