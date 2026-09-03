@@ -360,3 +360,24 @@ sglang 一行都没输出。同一镜像在 US-NC-1 和 US-KS-2 都顺利过了�
 **应对**（本次提交）：`handler` 在下载权重**之前**先 `torch.cuda.init()` 探一次（3 次、间隔
 10 秒），坏主机 30 秒内以 `GPU host unhealthy: …` 失败退回，进度阶段 `gpu_probe` 会带回
 GPU 名。后续可让控制面对这类错误自动换主机重试一次。
+
+### 第四次真实出片（2026-09-03 04:02Z，Pod `hzhqd4gbtidohl`，US-NC-1）：目录名
+
+6 个组件全部加载完成（"Loading required modules 6/6"），倒在组装阶段：
+
+```
+AttributeError: 'DiffusersTI2VPipelineConfig' object has no attribute 'audio_vae_config'
+```
+
+sglang `registry.get_model_info` 判定"是不是原生 H3"的第一步是 `get_non_diffusers_pipeline_name`：
+**目录 basename 必须等于 `MiniMax-H3`**（对照 `KNOWN_NON_DIFFUSERS_DIFFUSION_MODEL_PATTERNS` 里的
+`minimaxai/minimax-h3`）。不匹配就去读根 `model_index.json`，读不到就退到 diffusers 通用配置，
+H3 的 `MiniMaxH3PipelineConfig` 只被借走一个 `task_type`。`model_id` 参数在这条链上帮不上忙
+（它只影响 `_get_config_info`，而 `get_model_info` 早已进了 diffusers 分支）。
+
+**修复**：模型根改为 `/models/MiniMaxAI/MiniMax-H3`（镜像 HF 仓库 id），全部通过模板 env
+生效（`MODEL_ROOT`、`H3_BASE_MODEL_ROOT`、两个权重路径），**没有重建镜像**；代码默认值同步改，
+并加守卫：根目录名不是 `MiniMax-H3` 直接报错。新模板 `v3waitxptu`（仍是 `627dded` 镜像）。
+
+到此为止 sglang 的加载契约总结：`model_path=<…>/MiniMaxAI/MiniMax-H3`（根，不是分区）+
+`model_variant=fl2va` + `pipeline_class_name=MiniMaxH3Pipeline` + `trust_remote_code=True`。

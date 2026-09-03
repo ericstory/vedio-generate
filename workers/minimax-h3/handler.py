@@ -29,7 +29,13 @@ from worker_config import (
 )
 
 
-MODEL_ROOT = Path(os.getenv("MODEL_ROOT", "/runpod-volume/models/MiniMax-H3-PinkCherry"))
+# The root's basename must be exactly "MiniMax-H3", mirroring the HF repo id.
+# SGLang's registry (get_non_diffusers_pipeline_name) recognises the native H3
+# pipeline by comparing the directory's short name with "MiniMaxAI/MiniMax-H3";
+# any other name sends get_model_info down the generic diffusers path, whose
+# DiffusersTI2VPipelineConfig has no audio_vae_config, and the fourth real run
+# died on exactly that AttributeError after loading every component.
+MODEL_ROOT = Path(os.getenv("MODEL_ROOT", "/models/MiniMaxAI/MiniMax-H3"))
 # The stock MiniMax FL2VA partition supplies the text encoder, both VAEs, the
 # tokenizer/processor and every config. FL2VA serves t2va as well as first- and
 # last-frame conditioning, so one partition covers the whole product surface.
@@ -261,6 +267,11 @@ def _generator() -> DiffGenerator:
             raise RuntimeError(
                 "H3_BASE_MODEL_ROOT must point at the FL2VA partition inside the "
                 f"snapshot root, got {BASE_MODEL_ROOT}"
+            )
+        if PIPELINE_ROOT.name.lower() != "minimax-h3":
+            raise RuntimeError(
+                "the snapshot root must be named MiniMax-H3 for SGLang to select "
+                f"the native H3 pipeline config, got {PIPELINE_ROOT}"
             )
         if ATTENTION_BACKEND == "sage_attn":
             # SGLang silently falls back to a different backend when

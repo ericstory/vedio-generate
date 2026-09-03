@@ -316,3 +316,18 @@ def test_h3_worker_probes_the_gpu_before_downloading_anything() -> None:
     assert '"GPU host unhealthy:' in source
     body = source[source.index("def handler("):]
     assert body.index("assert_gpu_healthy()") < body.index("ensure_models(job)")
+
+
+def test_h3_snapshot_root_mirrors_the_hf_repo_id() -> None:
+    """SGLang selects the native H3 pipeline config by the directory's short name.
+
+    With any other basename get_model_info falls back to the generic diffusers
+    config, and pipeline assembly dies on `no attribute 'audio_vae_config'`.
+    """
+    handler = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    download = (WORKER_ROOT / "download_models.py").read_text(encoding="utf-8")
+    assert '"/models/MiniMaxAI/MiniMax-H3"' in handler
+    assert 'Path("/models/MiniMaxAI/MiniMax-H3")' in download
+    assert "MiniMax-H3-PinkCherry" not in handler
+    assert "MiniMax-H3-PinkCherry" not in download
+    assert 'PIPELINE_ROOT.name.lower() != "minimax-h3"' in handler
