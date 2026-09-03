@@ -350,7 +350,13 @@ def _generator() -> DiffGenerator:
                 # published recipes rely on.
                 "target": os.getenv("H3_LORA_TARGET", "all"),
                 "strength": TURBO_LORA_STRENGTH,
-                "merge_mode": os.getenv("H3_LORA_MERGE_MODE", "auto"),
+                # "auto" merges the LoRA into the base weights, and with online
+                # FP8 those weights sit in the quantizer's transposed layout;
+                # SGLang's merge adds an [out, in] delta to them and the sixth
+                # real run died on exactly that shape mismatch. "dynamic" keeps
+                # the LoRA as a runtime term on top of quant_method.apply(),
+                # which is quantization-agnostic.
+                "merge_mode": os.getenv("H3_LORA_MERGE_MODE", "dynamic"),
             }
             if TURBO_LORA_ALPHA:
                 lora_kwargs["lora_alpha"] = int(TURBO_LORA_ALPHA)

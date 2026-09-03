@@ -395,3 +395,16 @@ RuntimeError: Failed to load customized text_encoder; native fallback is disable
 （DiT 没有限制，video VAE 也没有）。sglang 只对 LTX2 自动把 text_encoder 设成 torch_sdpa。
 **修复**：`component_attention_backends={"text_encoder":"torch_sdpa","audio_vae":"torch_sdpa","video_vae":"torch_sdpa"}`，
 DiT 保持 `sage_attn`。先经模板 `H3_EXTRA_SERVER_ARGS_JSON` 注入跑第六次，代码默认值同步提交。
+
+### 第六次真实出片（2026-09-03 04:37Z，Pod `ln29qtkefc7ahg`，US-PA-1）：LoRA 合并
+
+**全部组件、PinkCherry 权重、FP8 量化都加载成功，调度器起来了**，倒在最后一步 turbo LoRA：
+
+```
+RuntimeError: Failed to set LoRA adapter: The size of tensor a (21504) must match the size of tensor b (5376) at non-singleton dimension 1
+```
+
+`lora_merge_mode=auto` 对非 FSDP 权重一律合并进底层权重（`_merge_lora_into_data` 直接
+`data.add_(B@A)`），而在线 FP8 量化后的权重是转置布局（`qkv_proj` 变成 [5376, 21504]），
+合并代码没有处理。**修复**：`H3_LORA_MERGE_MODE=dynamic`——LoRA 作为运行时增量叠加在
+`quant_method.apply()` 之后，与量化方法无关。先经模板跑第七次，代码默认值同步改。

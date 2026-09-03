@@ -341,3 +341,9 @@ def test_h3_only_the_dit_runs_on_the_fast_attention_backend() -> None:
     for component in ("text_encoder", "audio_vae", "video_vae"):
         assert f'"{component}": "torch_sdpa"' in block
     assert '"transformer"' not in block
+
+
+def test_h3_turbo_lora_is_applied_dynamically_on_top_of_fp8() -> None:
+    """Merging into online-FP8 weights fails on their transposed layout."""
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert 'os.getenv("H3_LORA_MERGE_MODE", "dynamic")' in source
