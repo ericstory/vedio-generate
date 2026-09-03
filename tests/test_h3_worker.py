@@ -306,3 +306,13 @@ def test_h3_handler_trusts_the_pinned_snapshot_code_and_takes_template_overrides
     assert 'os.getenv("H3_EXTRA_SERVER_ARGS_JSON", "")' in source
     # Overrides land after every built-in kwarg so a template can win any argument.
     assert source.index("kwargs.update(overrides)") < source.index("DiffGenerator.from_pretrained(**kwargs)")
+
+
+def test_h3_worker_probes_the_gpu_before_downloading_anything() -> None:
+    """A broken RunPod host must cost seconds, not a 16-minute download plus the Pod."""
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert "def assert_gpu_healthy" in source
+    assert "torch.cuda.init()" in source
+    assert '"GPU host unhealthy:' in source
+    body = source[source.index("def handler("):]
+    assert body.index("assert_gpu_healthy()") < body.index("ensure_models(job)")

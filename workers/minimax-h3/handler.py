@@ -173,6 +173,30 @@ def ensure_models(job: dict[str, Any] | None = None) -> float:
     return seconds
 
 
+def assert_gpu_healthy(attempts: int = 3, delay_seconds: float = 10.0) -> str:
+    """Fail within seconds on a broken host instead of after the 145 GB download.
+
+    The third real run (US-NE-1) spent 16 minutes downloading weights and then
+    died on the worker's first CUDA call with `CUDA unknown error`, with nothing
+    in the image changed from the two hosts that initialised fine. That is a
+    RunPod host fault, and the only useful response is to hand the Pod back at
+    once so it bills seconds rather than the better part of an hour. A couple of
+    retries cover a GPU that is merely slow to appear after container start.
+    """
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            torch.cuda.init()
+            return torch.cuda.get_device_name(0)
+        except Exception as exc:  # torch raises plain RuntimeError here
+            last = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+    raise RuntimeError(
+        f"GPU host unhealthy: {type(last).__name__}: {str(last)[:300]}"
+    ) from last
+
+
 def _require_models() -> None:
     missing = [str(path) for path in _required_model_files() if not path.is_file()]
     if missing:
@@ -411,6 +435,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         rendered = Path(directory) / "render.mp4"
         output = Path(directory) / "output.mp4"
         started = time.monotonic()
+        # Before anything expensive: a bad host must fail in seconds, not minutes.
+        _progress(job, "gpu_probe", gpu=assert_gpu_healthy())
         download_seconds = ensure_models(job)
         _progress(job, "model_load_start")
         load_started = time.monotonic()

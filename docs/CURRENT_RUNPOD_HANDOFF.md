@@ -343,3 +343,20 @@ sglang 的组件加载器经 diffusers `AutoModel.from_pretrained` 加载，必�
 
 另一个观察：US-KS-2 上容器 9 分钟才起来（拉 14GB 镜像），US-NC-1 只要约 1 分钟。
 30 分钟守卫下这仍够用，但保温方案（第七节）的价值又高了一截。
+
+### 第三次真实出片（2026-09-03 03:39Z，Pod `mzjgz8e9in8gcw`，US-NE-1）：坏主机
+
+`trust_remote_code` 修复后本应进入加载，但这台主机从头就不对劲：145GB 下载花了
+**974 秒**（PinkCherry 单文件 441 秒；前两次整套 3 分钟），随后 worker 在父进程第一次
+调 CUDA 就死：
+
+```
+RuntimeError: CUDA unknown error - this may be due to an incorrectly set up environment ...
+```
+
+sglang 一行都没输出。同一镜像在 US-NC-1 和 US-KS-2 都顺利过了这一步，判定为 RunPod
+主机故障。Pod 存活 1149 秒，约 $0.67，全部浪费。
+
+**应对**（本次提交）：`handler` 在下载权重**之前**先 `torch.cuda.init()` 探一次（3 次、间隔
+10 秒），坏主机 30 秒内以 `GPU host unhealthy: …` 失败退回，进度阶段 `gpu_probe` 会带回
+GPU 名。后续可让控制面对这类错误自动换主机重试一次。
