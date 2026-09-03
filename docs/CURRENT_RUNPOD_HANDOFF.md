@@ -2,12 +2,16 @@
 
 ## 当前状态一句话
 
-**第一次真实出片已经跑过一次（2026-09-03 02:13Z），链路本身全部打通**：volume-free
-放置、开机下权重、进度回调、结果回调、自动删 Pod 都验证成功。失败点只有一个，
-`model_path` 传错（详见第十二节），修复已提交，正在等新镜像。
+**MiniMax H3 + PinkCherry 主线已经真实出片成功**（2026-09-03 05:14Z，第八次尝试）：
+1344×768、5 秒、24fps、32kHz 立体声，走生产 API 全流程——volume-free 放置、开机下权重、
+进度/结果回调、上传、自动删 Pod。Pod 全程 504 秒约 $0.29，推理 108 秒，峰值显存 45.6GB。
 
-**下一个会话的第一件事：用修复后的镜像 SHA 建模板、改 Railway 模板 ID、重跑
-`smoke_submit.py`。** 本机到 Railway 边缘的网络时好时坏（第十一节），提交脚本已带重试。
+前七次失败全部是 sglang 加载契约的细节（第十二节逐条记录，每条都已修进代码），
+链路本身从第一次起就是好的。**现役模板 `02hdqp64b1`**（镜像 `627dded` + 模板 env 覆盖）；
+代码里的默认值已全部对齐到这套配置（最新提交 `5a869e1`），但**那份镜像还没在生产跑过**，
+下一次建模板用最新 SHA 时把 `mktemplate.py` 里的 `H3_EXTRA_SERVER_ARGS_JSON` 去掉再验一次。
+
+**下一步：第九节第 5 步起。**
 
 ---
 
@@ -234,13 +238,19 @@ HF token 已在 Railway 变量里，权限够。
 1. ~~确认 `d5dd9d5` 构建成功~~ ✅ 2026-09-02，见第四节
 2. ~~用新 SHA 建 volume-free 模板~~ ✅ `5hwjktbaa2`
 3. ~~Railway 变量 + 部署~~ ✅ `e654ad7c`
-4. ~~跑第一次真实出片~~ 已跑，回调 / 进度 / 自动删 Pod 三件事全部验证通过，
-   出片本身因 `model_path` 失败，已修（第十二节）。**重跑**：新镜像 → `mktemplate.py <sha>`
-   → Railway `RUNPOD_H3_POD_TEMPLATE_ID` → `smoke_submit.py`
-5. 成功后：用实测填 `H3_SECONDS_PER_MPIXEL_STEP` 打开 30 分钟超时守卫
+4. ~~跑第一次真实出片~~ ✅ 2026-09-03 05:14Z 成功（第八次，第十二节）
+5. 用实测填 `H3_SECONDS_PER_MPIXEL_STEP` 打开超时守卫：实测 108.4 秒 ÷（1.032 MP × 120 帧 × 9 步）
+   = **0.097 s/(MP·帧·步)**，建议填 `0.1`（768p 15 秒 360 帧投影 324 秒，远在 1500 秒预算内）。
+   模板 env 和 `mktemplate.py` 里都还是 `0`
+5b. 显存还有 50GB 余量（峰值 45.6 / 95），`dit_layerwise_resident_layers` 可以从 25 往 40 提，
+   每提一层少流一层权重；每次改完看返回的 `peak_memory_mb`
+5c. 用最新 SHA 的镜像（`5a869e1`，默认值已含全部修复）建一个**不带**
+   `H3_EXTRA_SERVER_ARGS_JSON` 的模板验一次，确认代码默认值等价于模板覆盖
 6. 保温（拉取式 worker + 自动空闲超时）
 7. 10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力
-8. 清理：删 9 个卷（省 $70/月）、8 个闲置模板、5 个残留 serverless endpoint。
+8. 清理：删 9 个卷（省 $70/月）、闲置模板（今天迭代留下的 `5hwjktbaa2`、`sx4pndyt2r`、
+   `kdf3q6n3i4`、`v3waitxptu`、`7xnj6d52vv`、`lpalzoy70e` 都可删，**现役是 `02hdqp64b1`**）、
+   5 个残留 serverless endpoint。
    ⚠️ **LTX 的 NE-1 卷 `fn6at7unxa` 不能删**——生产 endpoint `aoma1602mogius`
    还挂着它，要等 V1 迁到 Pod 链路之后
 9. V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）
@@ -427,3 +437,36 @@ video VAE 按 sglang 配置 fp32 常驻约 21GB；`text_encoder_cpu_offload` 走
 把**传入的每个键**都记为显式设置（值为 null 也算），所以想让它 auto 决策不能靠 JSON 传 null；
 显式 `layerwise_offload_components` 的优先级高于旧的 `*_cpu_offload` 开关，直接给方案最稳。
 先经模板跑第八次，代码里三个档位同步改（48GB/32GB 档是按比例缩的猜测，未实测）。
+
+### 第八次真实出片（2026-09-03 05:05Z，Pod `mz8igw8nan53lw`，US-NC-1）：✅ 成功
+
+模板 `02hdqp64b1`（镜像 `627dded` + env 覆盖：`H3_LORA_MERGE_MODE=dynamic`、
+`H3_EXTRA_SERVER_ARGS_JSON` 含 SDPA 组件覆盖和逐层卸载方案）。
+
+| 阶段 | 实测 |
+| --- | --- |
+| 建 Pod → 容器起来 | 约 1 分钟（US-NC-1，镜像有缓存） |
+| 下权重 145GB | 113 秒 |
+| 模型加载（含 FP8、PinkCherry、动态 LoRA） | 133 秒 |
+| 推理 1344×768 × 120 帧 × 9 步 + 音频 | **108 秒** |
+| 上传 | 0.2 秒 |
+| Pod 存活（含控制面删除延迟） | 504 秒 ≈ $0.29 |
+| 峰值显存 | 45.6 GB / 95 GB |
+
+输出 `/generate/media/611c224c-690d-4c58-97d1-d779f54240fb.mp4`，seed 2083542369，
+`verified_configuration=true`，有音频。元数据里 `performance_mode` 显示 `speed` 是旧镜像
+handler 的报告字段，实际生效的是模板覆盖的 `memory`；新代码报告值已对齐。
+
+**八次的总账**：GPU 费用约 $2.5，其中真正浪费的是坏主机那次 $0.67。
+
+### sglang v0.5.18 加载 MiniMax H3 的完整契约（本次踩出来的）
+
+1. `model_path` = 快照根，目录名必须是 `MiniMax-H3`（例：`/models/MiniMaxAI/MiniMax-H3`），
+   `model_variant="fl2va"`，`pipeline_class_name="MiniMaxH3Pipeline"`
+2. `trust_remote_code=True`（FL2VA 的 VAE/编码器是自定义代码）
+3. `component_attention_backends={"text_encoder":"torch_sdpa","audio_vae":"torch_sdpa","video_vae":"torch_sdpa"}`，
+   DiT 用 `sage_attn`
+4. `quantization="fp8"` 时 LoRA 必须 `merge_mode="dynamic"`
+5. 单卡 96GB 不能全常驻：`layerwise_offload_components=["dit","text_encoder","vae"]`，
+   `dit_layerwise_resident_layers=25`（可上调），`dit_offload_prefetch_size=2`，`performance_mode="memory"`
+6. 传给 `from_kwargs` 的每个键都算显式设置（含 null），别指望 auto
