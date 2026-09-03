@@ -6,6 +6,7 @@ const statusMap = {
   cancelled: ['已取消', 'failed'], expired: ['已过期', 'failed']
 };
 const modelNames = {
+  'minimax-h3-pinkcherry': '自建主线 · MiniMax H3 + PinkCherry',
   'wan-2.2-a14b-adult-v2': '自建 V2 · Wan 2.2 成人 LoRA',
   'pinkcherry-ltx-2.3-v1.8': '自建 · PinkCherry LTX 2.3',
   'seedance-2.5': 'Seedance 2.5',
@@ -13,14 +14,23 @@ const modelNames = {
   'seedance-2-fast': 'Seedance 2.0 Fast',
   'seedance-2.0': 'Seedance 2.0'
 };
-const selfHostedModels = new Set(['pinkcherry-ltx-2.3-v1.8', 'wan-2.2-a14b-adult-v2']);
+const selfHostedModels = new Set(['minimax-h3-pinkcherry', 'pinkcherry-ltx-2.3-v1.8', 'wan-2.2-a14b-adult-v2']);
+const H3_MODEL = 'minimax-h3-pinkcherry';
 const progressStageNames = {
-  model_load_start: '正在加载视频模型', model_load_done: '视频模型就绪',
+  awaiting_gpu: '正在申请云 GPU 机器', pod_created: '云 GPU 已分配，正在启动',
+  gpu_probe: '正在检查 GPU', model_download_start: '正在下载模型权重（约 2 分钟）', model_download_done: '模型权重就绪',
+  model_load_start: '正在加载视频模型', model_load_done: '模型就绪，视频推理中',
   video_start: '视频推理中', video_done: '视频推理完成',
   audio_model_load_start: '正在加载音频模型', audio_model_load_done: '音频模型就绪',
   audio_start: '音频生成中', audio_done: '音频生成完成',
   upload_start: '正在上传结果', complete: '收尾中'
 };
+function progressLabel(progress) {
+  if (!progress || !progress.stage) return '';
+  const label = progressStageNames[progress.stage] || '';
+  if (progress.stage === 'awaiting_gpu' && progress.attempts > 0) return `${label}（已申请 ${progress.attempts} 次，容量空出后自动开始）`;
+  return label;
+}
 
 function escapeHtml(value='') {
   const node = document.createElement('span'); node.textContent = value; return node.innerHTML;
@@ -98,29 +108,40 @@ function renderDetail(task) {
   if(task.status==='succeeded' && task.video_url) container.innerHTML=`<video controls autoplay muted playsinline src="${escapeHtml(task.video_url)}"></video><a class="download-link" href="${escapeHtml(task.video_url)}" target="_blank" rel="noopener">打开原视频 ↗</a>`;
   else if(kind==='failed') container.innerHTML='<div class="result-placeholder failed-mark"><span>!</span><b>生成未完成</b><small>请检查失败原因后重新尝试</small></div>';
   else {
-    const stage=task.provider_metadata && task.provider_metadata.progress && task.provider_metadata.progress.stage;
-    const stageLabel=progressStageNames[stage];
-    container.innerHTML=`<div class="result-placeholder"><span class="loader"></span><b>${stageLabel?escapeHtml(stageLabel):'正在创作中'}</b><small>通常需要几分钟，请稍候</small></div>`;
+    const stageLabel=progressLabel(task.provider_metadata && task.provider_metadata.progress);
+    const hint=selfHostedModels.has(task.model) ? '云 GPU 按需启动，通常 5–8 分钟出片，请稍候' : '通常需要几分钟，请稍候';
+    container.innerHTML=`<div class="result-placeholder"><span class="loader"></span><b>${stageLabel?escapeHtml(stageLabel):'正在创作中'}</b><small>${hint}</small></div>`;
   }
 }
 function resetComposer() { state.selected=null; renderTasks(); $('#detail-view').hidden=true; $('#composer-view').hidden=false; closeSidebar(); $('#prompt').focus(); }
 function openSidebar(){ $('#sidebar').classList.add('open'); $('#sidebar-scrim').classList.add('open'); }
 function closeSidebar(){ $('#sidebar').classList.remove('open'); $('#sidebar-scrim').classList.remove('open'); }
 function syncModelCapabilities() {
-  const model=$('#model').value; const selfHosted=selfHostedModels.has(model); const wan=model==='wan-2.2-a14b-adult-v2';
+  const model=$('#model').value; const selfHosted=selfHostedModels.has(model); const wan=model==='wan-2.2-a14b-adult-v2'; const h3=model===H3_MODEL;
   const referenceControl=$('#reference-control'); const audio=$('#generate-audio');
   referenceControl.classList.toggle('disabled', selfHosted);
   $('#reference').disabled=selfHosted;
-  if(selfHosted){ clearReference(); audio.checked=true; audio.disabled=!wan; }
+  // H3 renders its soundtrack natively and can drop it on request; Wan runs a
+  // second audio model; LTX always ships audio.
+  if(selfHosted){ clearReference(); audio.checked=true; audio.disabled=!(wan||h3); }
   else { audio.checked=true; audio.disabled=false; }
-  $('#audio-control').hidden=selfHosted && !wan;
+  $('#audio-control').hidden=selfHosted && !(wan||h3);
   $('#model-hint').hidden=!selfHosted;
   // LTX 2.3 MVP is benchmarked at 480p/720p; keep Seedance's 1080p option independent.
-  Array.from($('#resolution').options).forEach(option=>{if(option.textContent==='1080p')option.disabled=selfHosted;});
-  if(selfHosted && $('#resolution').value==='1080p') $('#resolution').value='720p';
+  // 768 is H3's short edge and the only measured recipe, so it is H3-only and the H3 default.
+  const resolution=$('#resolution');
+  Array.from(resolution.options).forEach(option=>{
+    if(option.textContent==='1080p')option.disabled=selfHosted;
+    if(option.textContent==='768p')option.disabled=!h3;
+  });
+  if(h3 && resolution.value!=='768p') resolution.value='768p';
+  if(!h3 && resolution.value==='768p') resolution.value='720p';
+  if(selfHosted && resolution.value==='1080p') resolution.value='720p';
   Array.from($('#ratio').options).forEach(option=>option.disabled=false);
   Array.from($('#duration').options).forEach(option=>option.disabled=false);
-  $('#model-hint').innerHTML=wan
+  $('#model-hint').innerHTML=h3
+    ? '<b>自建主线 · 云 GPU 按需 Pod</b> · MiniMax H3 + PinkCherry · 768p · 4–15 秒 · 原生同步音频 · 提交后自动排队申请 GPU，约 5–8 分钟出片'
+    : wan
     ? '<b>独立云 GPU 质量链路</b> · Wan 2.2 A14B · 成人双 LoRA · 4–15 秒 · 全画幅 · AI 生成音效'
     : '<b>独立云 GPU 链路</b> · LTX 2.3 Distilled · 提示词直接生成同步音视频，首版不含参考图';
 }
@@ -136,7 +157,8 @@ $('#generate-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form=event.currentTarget; const button=$('#submit-button'); button.disabled=true; button.innerHTML='<i class="mini-loader"></i> 提交中';
   const data=new FormData(form); data.set('generate_audio', data.has('generate_audio') ? 'true' : 'false');
   try {
-    const result=await api('./api/tasks', {method:'POST', body:data}); showToast('任务已提交，正在开始创作');
+    const result=await api('./api/tasks', {method:'POST', body:data});
+    showToast(selfHostedModels.has(result.task.model) ? '任务已加入队列，正在申请云 GPU' : '任务已提交，正在开始创作');
     form.reset(); clearReference(); syncModelCapabilities(); $('#char-count').textContent='0 / 3000'; await loadTasks(true); openTask(result.task.id);
   } catch(err) { showRequestError(err); }
   finally { button.disabled=false; button.innerHTML='<span>✦</span> 开始生成'; }

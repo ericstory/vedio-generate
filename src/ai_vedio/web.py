@@ -144,8 +144,19 @@ class TaskStore:
                 db.execute("ALTER TABLE tasks ADD COLUMN quality_vote INTEGER")
             if "provider_metadata" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN provider_metadata TEXT")
+            if "generate_audio" not in columns:
+                db.execute(
+                    "ALTER TABLE tasks ADD COLUMN generate_audio INTEGER NOT NULL DEFAULT 1"
+                )
+            # Legacy Seedance rows used the task id as the provider id. Pod-lane
+            # tasks legitimately carry no provider id while they wait for a GPU,
+            # and backfilling those would turn "still queued" into "lost Pod".
+            pod_placeholders = ",".join("?" for _ in POD_PROVIDERS)
             db.execute(
-                "UPDATE tasks SET provider_task_id=id WHERE provider_task_id IS NULL OR provider_task_id=''"
+                "UPDATE tasks SET provider_task_id=id "
+                "WHERE (provider_task_id IS NULL OR provider_task_id='') "
+                f"AND provider NOT IN ({pod_placeholders})",
+                tuple(sorted(POD_PROVIDERS)),
             )
 
     def connect(self) -> sqlite3.Connection:
@@ -157,17 +168,38 @@ class TaskStore:
         task = {
             "provider": "seedance",
             "provider_task_id": task["id"],
+            "generate_audio": 1,
             **task,
         }
         with self.connect() as db:
             db.execute(
                 """INSERT INTO tasks
                 (id, provider, provider_task_id, prompt, model, ratio, resolution, duration, has_reference,
-                 status, video_url, error, created_at, updated_at)
+                 generate_audio, status, video_url, error, created_at, updated_at)
                 VALUES (:id, :provider, :provider_task_id, :prompt, :model, :ratio, :resolution, :duration,
-                        :has_reference, :status, NULL, NULL, :created_at, :created_at)""",
+                        :has_reference, :generate_audio, :status, NULL, NULL, :created_at, :created_at)""",
                 task,
             )
+
+    def attach_provider_task(self, task_id: str, provider_task_id: str) -> None:
+        """Record the Pod a queued task finally got."""
+        with self.connect() as db:
+            db.execute(
+                "UPDATE tasks SET provider_task_id=?, updated_at=? WHERE id=?",
+                (provider_task_id, _now(), task_id),
+            )
+
+    def pending_pod_tasks(self, provider: str) -> list[dict[str, Any]]:
+        """Queued Pod-lane tasks that have not been given a Pod yet."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM tasks
+                WHERE provider=? AND status='queued'
+                  AND (provider_task_id IS NULL OR provider_task_id='')
+                ORDER BY created_at ASC""",
+                (provider,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def update_remote(self, task_id: str, remote: dict[str, Any]) -> None:
         status = str(remote.get("status") or "processing")
@@ -269,16 +301,54 @@ def _now() -> str:
 
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     task["has_reference"] = bool(task.get("has_reference"))
+    task["generate_audio"] = bool(task.get("generate_audio", 1))
     if task.get("provider_metadata"):
         with suppress(ValueError, TypeError):
             task["provider_metadata"] = json.loads(task["provider_metadata"])
     return task
 
 
+CAPACITY_PHRASES = (
+    "no instances currently available",
+    "no longer any instances available",
+)
+# RunPod answers a capacity miss with HTTP 400, so the phrase is the signal;
+# these codes are the API itself having a bad moment and are just as free.
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def _is_capacity_error(exc: SeedanceError) -> bool:
+    message = exc.upstream_message.lower()
+    return any(phrase in message for phrase in CAPACITY_PHRASES)
+
+
+def _is_transient_provider_error(exc: SeedanceError) -> bool:
+    return exc.status_code is None or exc.status_code in _TRANSIENT_STATUS_CODES
+
+
+def _generation_error_text(exc: SeedanceError) -> str:
+    """One line for the task record when the provider rejects a queued task."""
+    _, detail, _ = _classify_generation_error(exc)
+    upstream = exc.upstream_message.strip()
+    return f"{detail}：{upstream[:300]}" if upstream else detail
+
+
 def _generation_error(exc: SeedanceError) -> JSONResponse:
+    status_code, detail, guidance = _classify_generation_error(exc)
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "detail": detail,
+            "code": exc.code or "GENERATION_REJECTED",
+            "upstream_message": exc.upstream_message[:500],
+            "guidance": guidance,
+        },
+    )
+
+
+def _classify_generation_error(exc: SeedanceError) -> tuple[int, str, list[str]]:
     upstream = exc.upstream_message
     searchable = f"{exc.code or ''} {upstream}".lower()
-    code = exc.code or "GENERATION_REJECTED"
     status_code = 422
 
     if any(term in searchable for term in ("moderation", "safety", "sensitive", "policy", "risk", "blocked")):
@@ -302,10 +372,7 @@ def _generation_error(exc: SeedanceError) -> JSONResponse:
             "图片需小于 30MB，宽高均为 300–6000px",
             "图片宽高比需处于 0.4–2.5 之间",
         ]
-    elif any(
-        term in searchable
-        for term in ("no instances currently available", "no longer any instances available")
-    ):
+    elif any(term in searchable for term in CAPACITY_PHRASES):
         # A capacity miss is not a content decision, and saying so sends people
         # off editing a prompt that was never the problem. No Pod is created and
         # nothing is billed when this happens.
@@ -329,16 +396,7 @@ def _generation_error(exc: SeedanceError) -> JSONResponse:
         ]
         if exc.status_code and exc.status_code >= 500:
             status_code = 502
-
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "detail": detail,
-            "code": code,
-            "upstream_message": upstream[:500],
-            "guidance": guidance,
-        },
-    )
+    return status_code, detail, guidance
 
 
 def _sign_session(username: str, secret: str) -> str:
@@ -476,6 +534,118 @@ def _runpod_provider_cost_guard_tick(
     return bool(active_before)
 
 
+def _task_metadata(task: dict[str, Any]) -> dict[str, Any]:
+    raw = task.get("provider_metadata")
+    if isinstance(raw, dict):
+        return raw
+    if raw:
+        with suppress(ValueError, TypeError):
+            decoded = json.loads(raw)
+            if isinstance(decoded, dict):
+                return decoded
+    return {}
+
+
+def _acquire_pending_pods(
+    store: TaskStore, *, provider: str, client: RunPodPodClient, label: str
+) -> None:
+    """Give queued Pod-lane tasks a GPU, one lane sweep per task per pass.
+
+    Submitting from the browser used to race RunPod capacity inside the HTTP
+    request: three sweeps, then a 503 the user could only answer by clicking
+    again. A capacity miss creates no Pod and bills nothing, so the guard loop
+    can keep asking for as long as the task is willing to wait, while the
+    request itself returns the moment the task is queued.
+    """
+    now = datetime.now(timezone.utc)
+    for task in store.pending_pod_tasks(provider):
+        task_id = task["id"]
+        progress = _task_metadata(task).get("progress")
+        progress = progress if isinstance(progress, dict) else {}
+        attempts = int(progress.get("attempts") or 0)
+        if attempts and progress.get("at"):
+            with suppress(ValueError, TypeError):
+                since_last = (now - datetime.fromisoformat(str(progress["at"]))).total_seconds()
+                if since_last < client.settings.acquire_retry_seconds:
+                    continue
+        waited = (now - datetime.fromisoformat(task["created_at"])).total_seconds()
+        if waited > client.settings.acquire_timeout_seconds:
+            minutes = max(1, round(client.settings.acquire_timeout_seconds / 60))
+            store.update_remote(
+                task_id,
+                {
+                    "status": "failed",
+                    "content": {},
+                    "error": (
+                        f"{label} 云 GPU 在 {minutes} 分钟内没有空闲机器（申请 {attempts} 次）；"
+                        "本次未创建 Pod，不产生费用，请稍后重新提交"
+                    ),
+                },
+            )
+            continue
+        attempts += 1
+        try:
+            remote = client.create_text_video(
+                prompt=task["prompt"],
+                model=task["model"],
+                ratio=task["ratio"],
+                resolution=task["resolution"],
+                duration=int(task["duration"]),
+                generate_audio=bool(task.get("generate_audio", 1)),
+                watermark=True,
+                task_id=task_id,
+                capacity_retry_sweeps=1,
+            )
+        except SeedanceError as exc:
+            if _is_capacity_error(exc) or _is_transient_provider_error(exc):
+                store.update_remote(
+                    task_id,
+                    {
+                        "status": "queued",
+                        "content": {
+                            "progress": {
+                                "stage": "awaiting_gpu",
+                                "attempts": attempts,
+                                "at": _now(),
+                                "reason": "capacity" if _is_capacity_error(exc) else "provider",
+                            }
+                        },
+                        "error": None,
+                    },
+                )
+                continue
+            store.update_remote(
+                task_id,
+                {"status": "failed", "content": {}, "error": _generation_error_text(exc)},
+            )
+            continue
+        except ValueError as exc:
+            store.update_remote(task_id, {"status": "failed", "content": {}, "error": str(exc)})
+            continue
+        pod_id = str(remote.get("id") or "")
+        if not pod_id:
+            store.update_remote(
+                task_id,
+                {"status": "failed", "content": {}, "error": "RunPod 创建 Pod 后未返回编号"},
+            )
+            continue
+        content = dict(remote.get("content") or {})
+        content.update(
+            {
+                # The 30 minute runtime cap counts from here, not from the click.
+                "pod_created_at": _now(),
+                "gpu_wait_seconds": round(waited, 1),
+                "gpu_acquire_attempts": attempts,
+                "progress": {"stage": "pod_created", "at": _now()},
+            }
+        )
+        store.attach_provider_task(task_id, pod_id)
+        store.update_remote(
+            task_id,
+            {"status": str(remote.get("status") or "queued"), "content": content, "error": None},
+        )
+
+
 def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool:
     ltx_active = _runpod_provider_cost_guard_tick(
         store,
@@ -496,13 +666,17 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
         if not os.getenv(POD_TEMPLATE_ENV_VARS[provider], "").strip():
             continue
         label = POD_TIMEOUT_LABELS[provider]
-        active_tasks = store.active_runpod(provider)
         with suppress(SeedanceError, ValueError):
             for client in client_factory():
-                for task in active_tasks:
-                    pod_id = task.get("provider_task_id") or task["id"]
-                    created_at = datetime.fromisoformat(task["created_at"])
-                    age = (datetime.now(timezone.utc) - created_at).total_seconds()
+                _acquire_pending_pods(store, provider=provider, client=client, label=label)
+                for task in store.active_runpod(provider):
+                    pod_id = str(task.get("provider_task_id") or "")
+                    if not pod_id:
+                        # Still waiting for capacity: nothing is billed yet and
+                        # the acquisition pass owns that deadline.
+                        continue
+                    started_at = str(_task_metadata(task).get("pod_created_at") or task["created_at"])
+                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(started_at)).total_seconds()
                     if age > client.settings.maximum_runtime_seconds:
                         client.delete_pod(pod_id)
                         store.update_remote(
@@ -762,14 +936,22 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         tasks = store.list()
         active = [task for task in tasks if task["status"] not in TERMINAL_STATUSES]
         if active:
-            for task in active[:10]:
-                try:
-                    for client in _provider_client(task.get("provider") or "seedance"):
-                        remote_id = task.get("provider_task_id") or task["id"]
-                        store.update_remote(task["id"], client.get_task(remote_id))
-                except (SeedanceError, ValueError):
-                    # A temporary provider outage must not make the whole task list unavailable.
-                    continue
+            def refresh() -> None:
+                for task in active[:10]:
+                    if task.get("provider") in POD_PROVIDERS and not task.get("provider_task_id"):
+                        # Queued for a GPU; the guard loop owns it until a Pod exists.
+                        continue
+                    try:
+                        for client in _provider_client(task.get("provider") or "seedance"):
+                            remote_id = task.get("provider_task_id") or task["id"]
+                            store.update_remote(task["id"], client.get_task(remote_id))
+                    except (SeedanceError, ValueError):
+                        # A temporary provider outage must not make the whole task list unavailable.
+                        continue
+
+            # Provider polls are blocking HTTP calls; keep the event loop free
+            # for the Pod callbacks and the other browser tabs.
+            await asyncio.to_thread(refresh)
             tasks = store.list()
         return {"tasks": tasks}
 
@@ -814,7 +996,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 detail="自建 GPU 当前已有任务，请等待完成后再提交",
             )
         if is_self_hosted and resolution == "1080p":
-            raise HTTPException(status_code=422, detail="自建模型首版仅支持 480p 或 720p")
+            supported = "480p、720p 或 768p" if model == H3_MODEL else "480p 或 720p"
+            raise HTTPException(status_code=422, detail=f"自建模型首版仅支持 {supported}")
         if resolution == "768p" and model != H3_MODEL:
             raise HTTPException(
                 status_code=422, detail="768p 只有 MiniMax H3 支持"
@@ -849,7 +1032,41 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 raise HTTPException(status_code=413, detail="参考图不能超过 30MB")
             image_data_url = f"data:{reference.content_type};base64,{base64.b64encode(raw).decode()}"
         task_id = str(uuid4())
-        try:
+        created_at = _now()
+        task = {
+            "id": task_id,
+            "provider": provider,
+            "provider_task_id": task_id,
+            "prompt": prompt,
+            "model": model,
+            "ratio": ratio,
+            "resolution": resolution,
+            "duration": duration,
+            "generate_audio": int(bool(generate_audio)),
+            "has_reference": int(bool(image_data_url)),
+            "status": "queued",
+            "created_at": created_at,
+        }
+        if provider in POD_PROVIDERS and settings.runpod_cost_guard_enabled:
+            # One-shot Pod lanes get their GPU from the guard loop, not inside
+            # this request: a capacity miss then costs a short wait in the task
+            # list instead of a 503 and another click, and the event loop never
+            # blocks on RunPod's capacity race.
+            task["provider_task_id"] = ""
+            store.create(task)
+            store.update_remote(
+                task_id,
+                {
+                    "status": "queued",
+                    "content": {
+                        "progress": {"stage": "awaiting_gpu", "attempts": 0, "at": created_at}
+                    },
+                    "error": None,
+                },
+            )
+            return {"task": store.get(task_id)}
+
+        def submit() -> dict[str, Any]:
             for client in _provider_client(provider):
                 options = dict(
                     ratio=ratio,
@@ -861,11 +1078,15 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 if provider in POD_PROVIDERS:
                     options["task_id"] = task_id
                 if image_data_url and not is_self_hosted:
-                    remote = client.create_reference_video(
+                    return client.create_reference_video(
                         prompt=prompt, image_url=image_data_url, model=model, **options
                     )
-                else:
-                    remote = client.create_text_video(prompt=prompt, model=model, **options)
+                return client.create_text_video(prompt=prompt, model=model, **options)
+            raise RuntimeError("provider factory yielded no client")
+
+        try:
+            # Provider submission is blocking HTTP; run it off the event loop.
+            remote = await asyncio.to_thread(submit)
         except SeedanceError as exc:
             return _generation_error(exc)
         except ValueError as exc:
@@ -873,20 +1094,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         provider_task_id = str(remote.get("id") or "")
         if not provider_task_id:
             raise HTTPException(status_code=502, detail="生成服务未返回任务编号")
-        created_at = _now()
-        task = {
-            "id": task_id,
-            "provider": provider,
-            "provider_task_id": provider_task_id,
-            "prompt": prompt,
-            "model": model,
-            "ratio": ratio,
-            "resolution": resolution,
-            "duration": duration,
-            "has_reference": int(bool(image_data_url)),
-            "status": str(remote.get("status") or "queued"),
-            "created_at": created_at,
-        }
+        task["provider_task_id"] = provider_task_id
+        task["status"] = str(remote.get("status") or "queued")
         try:
             store.create(task)
             store.update_remote(task_id, remote)

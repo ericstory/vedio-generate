@@ -604,3 +604,44 @@ def test_volume_free_lane_drops_the_data_centre_pin(monkeypatch) -> None:
         # Container disk has to hold the weights the volume used to hold.
         assert body["disk"] == 220
     client.close()
+
+
+def test_pod_caller_can_ask_for_a_single_capacity_sweep(monkeypatch) -> None:
+    """The guard loop retries on its own cadence, so each pass sweeps once."""
+    from ai_vedio.config import RunPodPodSettings
+    from ai_vedio.runpod import RunPodError, RunPodPodClient
+
+    settings = RunPodPodSettings(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        additional_gpu_ids=("NVIDIA GeForce RTX 5090",),
+        capacity_retry_sweeps=3,
+        capacity_retry_delay_seconds=0,
+        ui_model_id="minimax-h3-pinkcherry",
+    )
+    client = RunPodPodClient(settings)
+    seen: list[str] = []
+
+    def fake_request(method, path, **kwargs):
+        if method == "GET":
+            return {"env": {}}
+        seen.append(kwargs["json"]["gpu"]["id"])
+        raise _capacity_error()
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    try:
+        client.create_text_video(
+            prompt="cinematic wide shot",
+            model="minimax-h3-pinkcherry",
+            task_id="task-1",
+            capacity_retry_sweeps=1,
+        )
+    except RunPodError as exc:
+        assert "no longer any instances" in exc.upstream_message
+    else:
+        raise AssertionError("capacity exhaustion must raise")
+    assert seen == [settings.gpu_id, "NVIDIA GeForce RTX 5090"]
+    client.close()

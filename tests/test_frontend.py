@@ -61,3 +61,17 @@ def test_frontend_has_quality_vote_controls() -> None:
     assert 'data-vote="up"' in markup
     assert 'data-vote="down"' in markup
     assert "/vote" in script
+
+
+def test_frontend_treats_h3_as_self_hosted_and_names_its_queue_stages() -> None:
+    root = Path(__file__).parents[1] / "src" / "ai_vedio" / "web_assets"
+    script = (root / "static" / "app.js").read_text(encoding="utf-8")
+    assert "'minimax-h3-pinkcherry': '自建主线 · MiniMax H3 + PinkCherry'" in script
+    assert "new Set(['minimax-h3-pinkcherry'" in script
+    # The queue and the H3 worker both report stages the user has to be able to read.
+    for stage in ("awaiting_gpu", "pod_created", "gpu_probe", "model_download_start", "model_download_done"):
+        assert f"{stage}:" in script
+    assert "已申请 ${progress.attempts} 次" in script
+    # 768p is H3's short edge: enabled only there, and the H3 default.
+    assert "option.textContent==='768p')option.disabled=!h3" in script
+    assert "if(h3 && resolution.value!=='768p') resolution.value='768p'" in script

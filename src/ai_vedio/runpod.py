@@ -359,9 +359,12 @@ class RunPodPodClient:
         # Candidates are tried in preference order, so the best card still wins
         # whenever it is there.
         gpu_candidates = [self.settings.gpu_id, *self.settings.additional_gpu_ids]
+        # The guard loop retries on its own cadence and asks for a single sweep
+        # per pass; direct callers keep the configured count.
+        sweeps = int(options.get("capacity_retry_sweeps") or self.settings.capacity_retry_sweeps)
         attempts = [
             (gpu_id, dc, vol)
-            for _ in range(max(1, self.settings.capacity_retry_sweeps))
+            for _ in range(max(1, sweeps))
             for gpu_id in gpu_candidates
             for dc, vol in lanes
         ]

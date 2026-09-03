@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -658,3 +659,309 @@ def test_h3_lane_is_flag_gated_and_owns_768p(tmp_path: Path) -> None:
         assert wrong_lane.status_code == 422
         page = client.get("/generate")
         assert 'value="minimax-h3-pinkcherry" disabled' in page.text
+
+
+def _pod_settings(**overrides):
+    from ai_vedio.config import RunPodPodSettings
+
+    base = dict(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        ui_model_id="minimax-h3-pinkcherry",
+        acquire_retry_seconds=0,
+    )
+    base.update(overrides)
+    return RunPodPodSettings(**base)
+
+
+def _queued_h3_task(store: TaskStore, task_id: str = "queued-h3", created_at: str = "2026-01-01T00:00:00+00:00") -> None:
+    store.create(
+        {
+            "id": task_id,
+            "provider": "runpod_h3_pod",
+            "provider_task_id": "",
+            "prompt": "cinematic sunrise",
+            "model": "minimax-h3-pinkcherry",
+            "ratio": "16:9",
+            "resolution": "768p",
+            "duration": 5,
+            "generate_audio": 0,
+            "has_reference": 0,
+            "status": "queued",
+            "created_at": created_at,
+        }
+    )
+
+
+def _capacity_error() -> RunPodError:
+    body = {
+        "detail": "There are no longer any instances available with the requested specifications.",
+        "status": 400,
+        "title": "Bad Request",
+    }
+    return RunPodError(f"RunPod Pod API HTTP 400: {body}", status_code=400, error=body)
+
+
+def test_pod_task_is_queued_without_touching_the_provider(tmp_path: Path, monkeypatch) -> None:
+    """With the guard loop running, submitting returns before any Pod exists."""
+    def provider_must_not_be_called(provider: str):
+        raise AssertionError(f"provider {provider} should not be called during the request")
+
+    monkeypatch.setattr(web, "_provider_client", provider_must_not_be_called)
+    # The guard loop itself must stay quiet in this test.
+    monkeypatch.setattr(web, "_runpod_cost_guard_tick", lambda store, shutdown_if_idle: False)
+    settings = replace(
+        web_settings(tmp_path), h3_enabled=True, runpod_cost_guard_enabled=True,
+        runpod_cost_guard_poll_seconds=3600,
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        response = client.post(
+            "/generate/api/tasks",
+            data={
+                "prompt": "cinematic wide shot of a sunrise",
+                "model": "minimax-h3-pinkcherry",
+                "ratio": "16:9",
+                "resolution": "768p",
+                "duration": 5,
+                "generate_audio": "false",
+            },
+        )
+        assert response.status_code == 201
+        task = response.json()["task"]
+        assert task["status"] == "queued"
+        assert task["provider_task_id"] == ""
+        assert task["generate_audio"] is False
+        assert task["provider_metadata"]["progress"]["stage"] == "awaiting_gpu"
+        # A second submission waits behind the queued one exactly like a running Pod.
+        again = client.post(
+            "/generate/api/tasks",
+            data={"prompt": "another", "model": "minimax-h3-pinkcherry", "resolution": "768p", "duration": 5},
+        )
+        assert again.status_code == 429
+        # Listing must not try to poll a Pod that does not exist yet.
+        listed = client.get("/generate/api/tasks").json()["tasks"]
+        assert listed[0]["id"] == task["id"]
+
+
+def test_guard_acquires_a_pod_for_a_queued_task(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _queued_h3_task(store, created_at=datetime.now(timezone.utc).isoformat())
+    seen: list[dict] = []
+
+    class FakePodClient:
+        settings = _pod_settings()
+
+        def create_text_video(self, **kwargs):
+            seen.append(kwargs)
+            return {
+                "id": "pod-new",
+                "status": "queued",
+                "content": {"video_url": None, "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "pod_price_per_hour": 2.09},
+                "error": None,
+            }
+
+        def get_task(self, pod_id: str):
+            assert pod_id == "pod-new"
+            return {"id": pod_id, "status": "processing", "content": {}, "error": None}
+
+        def delete_pod(self, pod_id: str):
+            raise AssertionError("a freshly acquired Pod must not be deleted")
+
+    def fake_client():
+        yield FakePodClient()
+
+    monkeypatch.setenv("RUNPOD_H3_POD_TEMPLATE_ID", "tpl")
+    monkeypatch.delenv("RUNPOD_WAN_POD_TEMPLATE_ID", raising=False)
+    monkeypatch.setattr(web, "_h3_pod_client", fake_client)
+    monkeypatch.setattr(web, "_runpod_provider_cost_guard_tick", lambda *a, **k: False)
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    assert len(seen) == 1
+    assert seen[0]["prompt"] == "cinematic sunrise"
+    assert seen[0]["resolution"] == "768p"
+    assert seen[0]["duration"] == 5
+    assert seen[0]["generate_audio"] is False
+    assert seen[0]["task_id"] == "queued-h3"
+    # The loop is the retry mechanism, so each pass asks for a single sweep.
+    assert seen[0]["capacity_retry_sweeps"] == 1
+    task = store.get("queued-h3")
+    assert task and task["provider_task_id"] == "pod-new"
+    # The Pod exists but the worker has not reported yet; its callbacks move
+    # the status from here on.
+    assert task["status"] == "queued"
+    metadata = task["provider_metadata"]
+    assert metadata["gpu_name"].startswith("NVIDIA RTX PRO 6000")
+    assert metadata["gpu_acquire_attempts"] == 1
+    assert metadata["pod_created_at"]
+    assert metadata["progress"]["stage"] == "pod_created"
+
+
+def test_guard_keeps_waiting_on_capacity_then_fails_without_a_pod(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _queued_h3_task(store, created_at=datetime.now(timezone.utc).isoformat())
+    calls = 0
+
+    class NoCapacity:
+        settings = _pod_settings(acquire_timeout_seconds=600)
+
+        def create_text_video(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise _capacity_error()
+
+        def get_task(self, pod_id: str):
+            raise AssertionError("nothing to poll while no Pod exists")
+
+        def delete_pod(self, pod_id: str):
+            raise AssertionError("no Pod was ever created")
+
+    def fake_client():
+        yield NoCapacity()
+
+    monkeypatch.setenv("RUNPOD_H3_POD_TEMPLATE_ID", "tpl")
+    monkeypatch.delenv("RUNPOD_WAN_POD_TEMPLATE_ID", raising=False)
+    monkeypatch.setattr(web, "_h3_pod_client", fake_client)
+    monkeypatch.setattr(web, "_runpod_provider_cost_guard_tick", lambda *a, **k: False)
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    task = store.get("queued-h3")
+    assert task and task["status"] == "queued"
+    assert task["provider_task_id"] == ""
+    assert task["provider_metadata"]["progress"] == {
+        **task["provider_metadata"]["progress"], "stage": "awaiting_gpu", "attempts": 2, "reason": "capacity",
+    }
+    assert calls == 2
+    # Past the acquisition window the task fails and says nothing was billed.
+    with store.connect() as db:
+        db.execute("UPDATE tasks SET created_at=? WHERE id=?", ("2026-01-01T00:00:00+00:00", "queued-h3"))
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is False
+    task = store.get("queued-h3")
+    assert task and task["status"] == "failed"
+    assert "未创建 Pod" in task["error"]
+    assert "10 分钟" in task["error"]
+    assert calls == 2
+
+
+def test_guard_fails_a_queued_task_on_a_non_transient_provider_error(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _queued_h3_task(store, created_at=datetime.now(timezone.utc).isoformat())
+
+    class PriceCap:
+        settings = _pod_settings()
+
+        def create_text_video(self, **kwargs):
+            raise RunPodError("RunPod Pod price $4.50/h exceeds the configured cap", status_code=None, error={"message": "price $4.50/h exceeds the configured cap"})
+
+        def delete_pod(self, pod_id: str):
+            pass
+
+    class Forbidden:
+        settings = _pod_settings()
+
+        def create_text_video(self, **kwargs):
+            raise RunPodError("RunPod Pod API HTTP 401: bad key", status_code=401, error={"message": "invalid api key"})
+
+    def price_client():
+        yield PriceCap()
+
+    def forbidden_client():
+        yield Forbidden()
+
+    monkeypatch.setenv("RUNPOD_H3_POD_TEMPLATE_ID", "tpl")
+    monkeypatch.delenv("RUNPOD_WAN_POD_TEMPLATE_ID", raising=False)
+    monkeypatch.setattr(web, "_runpod_provider_cost_guard_tick", lambda *a, **k: False)
+    # A connection-shaped error (no status code) is transient: keep waiting.
+    monkeypatch.setattr(web, "_h3_pod_client", price_client)
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    task = store.get("queued-h3")
+    assert task and task["status"] == "queued"
+    assert task["provider_metadata"]["progress"]["reason"] == "provider"
+    # A 401 will not fix itself; fail now with the readable explanation.
+    monkeypatch.setattr(web, "_h3_pod_client", forbidden_client)
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    task = store.get("queued-h3")
+    assert task and task["status"] == "failed"
+    assert task["error"].startswith("生成服务拒绝了本次请求")
+    assert "invalid api key" in task["error"]
+
+
+def test_pod_runtime_cap_counts_from_pod_creation_not_from_the_click(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    store.create(
+        {
+            "id": "waited-long",
+            "provider": "runpod_h3_pod",
+            "provider_task_id": "pod-live",
+            "prompt": "x",
+            "model": "minimax-h3-pinkcherry",
+            "ratio": "16:9",
+            "resolution": "768p",
+            "duration": 5,
+            "has_reference": 0,
+            "status": "processing",
+            # Clicked 40 minutes ago, but the Pod only came up a minute ago.
+            "created_at": (datetime.now(timezone.utc) - timedelta(minutes=40)).isoformat(),
+        }
+    )
+    store.update_remote(
+        "waited-long",
+        {"status": "processing", "content": {"pod_created_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()}, "error": None},
+    )
+    deleted: list[str] = []
+
+    class LivePod:
+        settings = _pod_settings()
+
+        def create_text_video(self, **kwargs):
+            raise AssertionError("nothing is queued")
+
+        def get_task(self, pod_id: str):
+            return {"id": pod_id, "status": "processing", "content": {}, "error": None}
+
+        def delete_pod(self, pod_id: str):
+            deleted.append(pod_id)
+
+    def fake_client():
+        yield LivePod()
+
+    monkeypatch.setenv("RUNPOD_H3_POD_TEMPLATE_ID", "tpl")
+    monkeypatch.delenv("RUNPOD_WAN_POD_TEMPLATE_ID", raising=False)
+    monkeypatch.setattr(web, "_h3_pod_client", fake_client)
+    monkeypatch.setattr(web, "_runpod_provider_cost_guard_tick", lambda *a, **k: False)
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    assert deleted == []
+    task = store.get("waited-long")
+    assert task and task["status"] == "processing"
+
+
+def test_store_restart_keeps_queued_pod_tasks_without_a_pod(tmp_path: Path) -> None:
+    """The legacy provider-id backfill must not invent a Pod id for a queued task."""
+    store = TaskStore(tmp_path / "tasks.db")
+    _queued_h3_task(store)
+    store.create(
+        {
+            "id": "legacy-seedance",
+            "provider": "seedance",
+            "provider_task_id": "",
+            "prompt": "x",
+            "model": "seedance-2.0",
+            "ratio": "16:9",
+            "resolution": "720p",
+            "duration": 6,
+            "has_reference": 0,
+            "status": "queued",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    reopened = TaskStore(tmp_path / "tasks.db")
+    assert reopened.get("queued-h3")["provider_task_id"] == ""
+    assert reopened.get("legacy-seedance")["provider_task_id"] == "legacy-seedance"
+    assert [task["id"] for task in reopened.pending_pod_tasks("runpod_h3_pod")] == ["queued-h3"]
+    assert reopened.pending_pod_tasks("runpod_wan_pod") == []

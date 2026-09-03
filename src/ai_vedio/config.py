@@ -89,6 +89,10 @@ class RunPodPodSettings:
     # How many times to sweep the whole lane list before giving up on capacity.
     capacity_retry_sweeps: int = 3
     capacity_retry_delay_seconds: float = 5.0
+    # A queued task waits this long for a Pod before failing without billing;
+    # the guard loop retries one lane sweep at this cadence in the meantime.
+    acquire_timeout_seconds: float = 900.0
+    acquire_retry_seconds: float = 20.0
     maximum_price_per_hour: float = 3.0
     maximum_runtime_seconds: int = 1800
     model_id: str = "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"
@@ -254,6 +258,12 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
         maximum_runtime_seconds=int(
             os.getenv("RUNPOD_WAN_POD_MAX_RUNTIME_SECONDS", "1800")
         ),
+        acquire_timeout_seconds=float(
+            os.getenv("RUNPOD_WAN_POD_ACQUIRE_TIMEOUT_SECONDS", "900")
+        ),
+        acquire_retry_seconds=float(
+            os.getenv("RUNPOD_WAN_POD_ACQUIRE_RETRY_SECONDS", "20")
+        ),
         model_id=os.getenv("WAN_MODEL_ID", "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"),
         model_version=os.getenv(
             "WAN_MODEL_VERSION", "2c5a06469cd2255816eb2e46b8e11600ed435d52"
@@ -308,6 +318,12 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
         ),
         maximum_runtime_seconds=int(
             os.getenv("RUNPOD_H3_POD_MAX_RUNTIME_SECONDS", "1800")
+        ),
+        acquire_timeout_seconds=float(
+            os.getenv("RUNPOD_H3_POD_ACQUIRE_TIMEOUT_SECONDS", "900")
+        ),
+        acquire_retry_seconds=float(
+            os.getenv("RUNPOD_H3_POD_ACQUIRE_RETRY_SECONDS", "20")
         ),
         container_disk_gb=int(os.getenv("RUNPOD_H3_POD_CONTAINER_DISK_GB", "220")),
         model_id=os.getenv("H3_MODEL_ID", "MiniMaxAI/MiniMax-H3"),
