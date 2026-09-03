@@ -347,3 +347,38 @@ def test_h3_turbo_lora_is_applied_dynamically_on_top_of_fp8() -> None:
     """Merging into online-FP8 weights fails on their transposed layout."""
     source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
     assert 'os.getenv("H3_LORA_MERGE_MODE", "dynamic")' in source
+
+
+def _write_safetensors(path: Path, metadata: dict | None) -> None:
+    import struct
+
+    header = {"w": {"dtype": "BF16", "shape": [1, 2], "data_offsets": [0, 4]}}
+    if metadata is not None:
+        header["__metadata__"] = metadata
+    encoded = json.dumps(header).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"\0" * 4)
+
+
+def test_h3_turbo_lora_alpha_comes_from_the_safetensors_header(tmp_path: Path) -> None:
+    """SGLang ignores safetensors metadata and falls back to alpha == rank; the
+    8-step export is rank 128 / alpha 8, so that fallback is a 16x overdrive."""
+    config = load_worker_config()
+    lightx2v = tmp_path / "turbo.safetensors"
+    _write_safetensors(
+        lightx2v,
+        {"floating_dtype": "bfloat16", "format": "pt", "key_format": "minimax-h3-diffusers", "alpha": "8"},
+    )
+    assert config.lora_metadata_alpha(lightx2v) == 8
+    bare = tmp_path / "bare.safetensors"
+    _write_safetensors(bare, None)
+    assert config.lora_metadata_alpha(bare) is None
+
+
+def test_h3_handler_passes_the_export_alpha_and_the_distillation_shift() -> None:
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    assert "return lora_metadata_alpha(TURBO_LORA)" in source
+    assert 'lora_kwargs["lora_alpha"] = alpha' in source
+    assert '"turbo_lora_alpha": _turbo_lora_alpha()' in source
+    # Distilled at video shift 6 / audio shift 3; 12 was never a recipe.
+    assert 'FLOW_SHIFT = float(os.getenv("H3_FLOW_SHIFT", "6.0"))' in source
+    assert 'AUDIO_FLOW_SHIFT = float(os.getenv("H3_AUDIO_FLOW_SHIFT", "3.0"))' in source

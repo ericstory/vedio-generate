@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
+import struct
+from pathlib import Path
 
 
 # MiniMax H3 emits a fixed 24 fps canonical output; sglang rejects any request
@@ -172,6 +175,27 @@ def validate_runtime_budget(
             "steps). Reduce duration, resolution or steps."
         )
     return projected
+
+
+def lora_metadata_alpha(path: Path) -> int | None:
+    """Read the training alpha lightx2v stores in the safetensors header.
+
+    SGLang only looks for an adapter_config.json next to the adapter, and a bare
+    safetensors download has none; it then falls back to alpha == rank, i.e. a
+    LoRA scale of 1.0. The 8-step 768p turbo export is rank 128 with alpha 8,
+    so that fallback applied the distilled delta 16x too strong and every frame
+    of the first three "successful" runs came out as the same noise texture.
+    lightx2v's own configs pass alpha 8 explicitly; this reads the same number
+    from the file so the two can never drift apart.
+    """
+    with Path(path).open("rb") as handle:
+        header_length = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(header_length))
+    metadata = header.get("__metadata__") or {}
+    raw = metadata.get("alpha")
+    if raw in (None, ""):
+        return None
+    return int(float(raw))
 
 
 def ensure_trigger(prompt: str, trigger: str) -> str:

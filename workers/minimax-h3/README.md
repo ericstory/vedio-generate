@@ -39,7 +39,7 @@ PinkCherry 可用性是**验证过的**，不是假设：读取 safetensors 头�
 - **音频**：H3 一次前向同时产出视频和 **32kHz 立体声**，直接 mux 成 H.264 + AAC。
   没有 AudioLDM2、没有第二次推理、没有 mux 步骤。`generate_audio=false` 时用
   ffmpeg `-an` 去掉音轨（仅复制流，不重编码）。
-- **推理**：SGLang 0.5.18、在线 FP8 量化、SageAttention、8 步蒸馏 LoRA、`flow_shift=12.0`、
+- **推理**：SGLang 0.5.18、在线 FP8 量化、SageAttention、8 步蒸馏 LoRA（alpha 8 / rank 128，从 safetensors 头读取）、`flow_shift=6.0`、
   `audio_flow_shift=3.0`。H3 只有 CFG 蒸馏的单正分支——**没有 negative prompt、
   没有 guidance scale**，传了会被拒。
   ⚠️ 步数是 **9 不是 8**：所有官方 turbo 配方都比 LoRA 名字多要一步（4 步档用 5、
@@ -75,7 +75,9 @@ H3_NSFW_TRANSFORMER_ENABLED=1
 H3_TURBO_LORA_ENABLED=1
 H3_TURBO_LORA_STRENGTH=1.0
 H3_INFERENCE_STEPS=9
-H3_FLOW_SHIFT=12.0
+H3_FLOW_SHIFT=6.0
+# 留空则从 LoRA 文件头读取（lightx2v 8-step 768p 导出是 8）；sglang 自己不读，留空且读不到会按 alpha=rank 放大 16 倍
+H3_TURBO_LORA_ALPHA=
 H3_AUDIO_FLOW_SHIFT=3.0
 H3_QUANTIZATION=fp8
 H3_ATTENTION_BACKEND=sage_attn

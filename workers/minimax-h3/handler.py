@@ -23,6 +23,7 @@ from worker_config import (
     expected_canvas,
     frames_for_duration,
     is_verified_configuration,
+    lora_metadata_alpha,
     short_edge_for,
     validate_prompt,
     validate_runtime_budget,
@@ -85,7 +86,9 @@ TURBO_LORA = Path(
 TURBO_LORA_ENABLED = os.getenv("H3_TURBO_LORA_ENABLED", "1") == "1"
 TURBO_LORA_STRENGTH = float(os.getenv("H3_TURBO_LORA_STRENGTH", "1.0"))
 # lightx2v ships the training alpha in safetensors metadata for the plain
-# (non-ComfyUI) exports, so this override normally stays unset.
+# (non-ComfyUI) exports, and SGLang does not read it (only adapter_config.json,
+# which a bare download lacks). The handler reads it itself; this override is
+# for experiments only.
 TURBO_LORA_ALPHA = os.getenv("H3_TURBO_LORA_ALPHA", "").strip()
 # Online post-load FP8 is the only quantization SGLang can derive from a BF16
 # checkpoint without a pre-quantized export, and SM12.x has native FP8 tensor
@@ -96,7 +99,11 @@ ATTENTION_BACKEND = os.getenv("H3_ATTENTION_BACKEND", "sage_attn").strip()
 # 4-step export is driven at 5 and the balanced profile at 9, because the flow
 # schedule needs N+1 sigmas for N denoise intervals. So the 8-step LoRA runs at 9.
 INFERENCE_STEPS = int(os.getenv("H3_INFERENCE_STEPS", "9"))
-FLOW_SHIFT = float(os.getenv("H3_FLOW_SHIFT", "12.0"))
+# The 8-step 768p export was distilled at video shift 6 / audio shift 3 (model
+# specs table in ModelTC/Minimax-H3-Turbo, and lightx2v's own
+# minimax_h3_fp8_8step.json). 12 is the illustrative value from the README's
+# shift note, not a recipe.
+FLOW_SHIFT = float(os.getenv("H3_FLOW_SHIFT", "6.0"))
 AUDIO_FLOW_SHIFT = float(os.getenv("H3_AUDIO_FLOW_SHIFT", "3.0"))
 # "lossless" is the pipeline default; "high" enables the audited Cache-DiT
 # profile (1.40x, SSIM 0.931 against lossless on MiniMax's own workload).
@@ -266,6 +273,13 @@ def residency_profile(total_vram_gb: float) -> dict[str, Any]:
     }
 
 
+def _turbo_lora_alpha() -> int | None:
+    """Explicit override first, then the alpha embedded in the export."""
+    if TURBO_LORA_ALPHA:
+        return int(TURBO_LORA_ALPHA)
+    return lora_metadata_alpha(TURBO_LORA)
+
+
 def _generator() -> DiffGenerator:
     """Load H3 with a residency plan matched to this Pod's GPU."""
     global _GENERATOR
@@ -366,8 +380,13 @@ def _generator() -> DiffGenerator:
                 # which is quantization-agnostic.
                 "merge_mode": os.getenv("H3_LORA_MERGE_MODE", "dynamic"),
             }
-            if TURBO_LORA_ALPHA:
-                lora_kwargs["lora_alpha"] = int(TURBO_LORA_ALPHA)
+            alpha = _turbo_lora_alpha()
+            if alpha is not None:
+                lora_kwargs["lora_alpha"] = alpha
+            print(
+                json.dumps({"stage": "turbo_lora", "alpha": alpha, "strength": TURBO_LORA_STRENGTH}),
+                flush=True,
+            )
             generator.set_lora(**lora_kwargs)
         _GENERATOR = generator
     return _GENERATOR
@@ -559,6 +578,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
                 else None
             ),
             "turbo_lora_strength": TURBO_LORA_STRENGTH if TURBO_LORA_ENABLED else None,
+            "turbo_lora_alpha": _turbo_lora_alpha() if TURBO_LORA_ENABLED else None,
             "gpu_name": torch.cuda.get_device_name(),
             "gpu_total_vram_gb": round(
                 torch.cuda.get_device_properties(0).total_memory / (1024**3), 1
