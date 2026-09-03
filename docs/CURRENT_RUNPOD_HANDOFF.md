@@ -2,18 +2,17 @@
 
 ## 当前状态一句话
 
-**MiniMax H3 + PinkCherry 主线已经三次真实出片成功**（第八次 05:14Z、第九次 07:06Z 各 5 秒，
-**第十次 07:59Z 是用户在网页上点的，768p/15 秒/360 帧，一次成功**），
-1344×768、24fps、32kHz 立体声，走生产全流程。
-**第九次是新形态**：web 提交 0.65 秒返回，守卫循环 5.1 秒拿到 Pod，
-提交到成片 482 秒；模板 `jkrh512m3s` 用最新镜像 `5a869e1`、**不带任何 env 覆盖**，
-峰值显存 45,616 MB 与第八次完全一致（代码默认值 = 模板覆盖，5c 验毕）；
-超时守卫已打开（`H3_SECONDS_PER_MPIXEL_STEP=0.1`，投影 111.5 秒 vs 实测 108.5 秒）。
+**H3 链路「链路通、画面废」：三次「成功」出片加用户网页提交的两条，画面全是同一张与提示词无关的噪点纹理。
+根因未定，H3 已在 UI 里禁用（`H3_ENABLED=0`）直到修好。** 第十四节是完整排查记录，
+第十三节的入队/守卫循环申请 GPU 是好的（三次都 5 秒内拿到 Pod），第十五节是本机网络结论。
 
-前七次失败全部是 sglang 加载契约的细节（第十二节逐条记录，每条都已修进代码）。
-web 端「点一次就稳」靠的是第十三节的入队 + 守卫循环申请 GPU（提交 `79dec8f`）。
+已排除：LoRA 键名匹配（208/266 层挂上）、LoRA alpha（配错了 16 倍，已修，但改对后仍是噪声）。
+已知：bf16 + 逐层卸载会在「Scheduler loop started」后挂死（两个 Pod 各 ≥15 分钟 / ≥1 小时无日志）。
+**下一个最值得做的实验：`H3_ATTENTION_BACKEND=torch_sdpa`（FP8 其余不变）**——H3 是 GQA
+（`num_query_groups`），Wan 不是；SageAttention 在 SM 12.0 上对 H3 的 GQA 打包 QKV 出 NaN
+是剩下最贴合「输出与 seed/提示词/LoRA 都无关」的解释。脚本已备好，见第十四节末尾。
 
-**下一步：第九节第 5b（显存余量调常驻层数）或第 6 步（保温）起。**
+**下一步：第十四节「下一步」。**
 
 ---
 
@@ -546,7 +545,7 @@ Railway 部署 `a9e92219`（2026-09-02 23:57 PT）。浏览器里确认：任务
 元数据新增 `pod_created_at`、`gpu_wait_seconds=5.1`、`gpu_acquire_attempts=1`、
 `projected_denoise_seconds=111.5`。
 
-### 第十次真实出片（2026-09-03 07:47Z，Pod `wyi57kcyp1qkp0`，US-NC-1）：✅ 成功，**用户从网页提交，768p / 15 秒**
+### 第十次真实出片（2026-09-03 07:47Z，Pod `wyi57kcyp1qkp0`，US-NC-1）：链路 ✅，**画面是噪声**（见第十四节），用户从网页提交，768p / 15 秒
 
 任务 `336afe53`，模板 `jkrh512m3s`，用户在浏览器里点「开始生成」，16:9、768p、15 秒、带音频。
 这是 H3 链路第一次跑满 15 秒（360 帧，是前两次的 3 倍）。
@@ -575,3 +574,87 @@ Railway 部署 `a9e92219`（2026-09-02 23:57 PT）。浏览器里确认：任务
 
 **没验到的**：容量拒绝的排队路径（三次都是第一次申请就拿到 Pod）。单元测试覆盖了它，
 线上要等真的缺货才看得到「正在申请云 GPU 机器（已申请 n 次）」。
+
+---
+
+## 十四、2026-09-03：三次「成功」出的全是噪声——排查记录（根因未定）
+
+**现象**：用户在网页上看第十次出片（768p/15 秒），画面是一张静止的棕灰色噪点纹理。
+把第八次（5 秒，海上日出）和第十次（15 秒，另一条提示词）的成片拉下来抽帧对比：
+**两条视频每个采样点的亮度均值逐点一致**（YAVG 96.5 / 89.6 / 90.8 / 91.2 / 91.4），
+音频响度也一样（mean −5.8 dB，max 0.0 dB 削顶），画面就是同一张纹理。
+提示词、seed、时长都不同却得到相同统计，说明模型输出与条件无关——
+**之前三次「成功」只是链路成功，没人看过画面。教训：出片验收必须抽帧看图，不能只看回调状态。**
+
+**排查**（零成本静态 + 两个诊断 Pod 约 $0.6）：
+
+1. LoRA 键名：HTTP Range 读 safetensors 头，624 个张量，键是 diffusers/PEFT 风格
+   （`transformer_blocks.N.attn.to_q.lora_A.default.weight`、`ff.net.0.proj`、`token_refiner.refiner_blocks.*`）。
+   sglang v0.5.18 的 `MiniMaxH3DiTArchConfig.param_names_mapping` 明确支持这套键
+   （链式规则：先剥 `.default`，再把 to_q/k/v 合并到 `qkv_proj`）。诊断 Pod 日志证实
+   `covers 208/266 LoRA layers`，没挂上的 58 层是 patch 投影和 AdaLN，本来就不在 LoRA 里。**排除。**
+2. **alpha**：文件头元数据 `{"alpha": "8", "key_format": "minimax-h3-diffusers"}`，rank 128，
+   正确缩放 8/128 = 0.0625。sglang **只从同目录 `adapter_config.json` 读 alpha**
+   （`load_lora_adapter`），我们只下了单个文件；没有 alpha 时 `lora_pipeline.py` 回退
+   `inferred_alpha = inferred_rank` → 缩放 1.0，**LoRA 增量被放大 16 倍**。
+   lightx2v 自己的 `configs/minimax_h3/dmd/minimax_h3_fp8_8step.json` 写的就是 `"alpha": 8`。
+   handler 早有 `H3_TURBO_LORA_ALPHA` 透传，但注释里以为 sglang 会自己读元数据——它不会。
+3. 顺带发现的第二个偏差：8-step 768p 这份 LoRA 的**训练 shift 是 video 6 / audio 3**
+   （ModelTC/Minimax-H3-Turbo 规格表 + lightx2v 8step 配置），我们用的 `H3_FLOW_SHIFT=12`
+   来自 README「shift 说明」里的示例数字，不是配方。步数 9（名字 +1）与 lightx2v `infer_steps: 9` 一致。
+
+**实验（诊断 Pod，各约 $0.3–2）**：
+
+| Pod | 配置差异 | 结果 |
+| --- | --- | --- |
+| `8k32x9vugs4ghw` US-NC-2 | 仅 `H3_TURBO_LORA_ALPHA=8` | 完成，推理 109 秒，**画面仍是同一张噪声**（亮度统计与噪声样本逐点一致）。日志：LoRA 208/266 层挂上；FP8 后 transformer 30.93 GB |
+| `ecmta5wce813tl` US-NE-1 | `{"quantization": null}`（bf16）+ alpha 8 | 拉镜像 6.5 分钟、下权重 973 秒；transformer 61.73 GB；**「Scheduler loop started」后 ≥15 分钟无日志**，被看护脚本上限删除 |
+| `otctorkijwb7d2` US-NC-2 | 同上 | 下权重 69 秒；**同一位置挂死 ≥1 小时**（FP8 时这一步 18 秒后就有「Converted 266 layers to LoRA layers」） |
+| `ingo1w6uzjmqad` US-PA-1 | 基线 | 拉镜像太慢，主动删除，无信息 |
+
+诊断花费约 $4.4，其中约 $3.7 浪费在两个 bf16 Pod 上——看护脚本在读 RunPod 日志 SSE 流时被
+心跳包卡住近一小时（Pod 没新日志时流不关、`readline` 不超时），回来已过上限就删 Pod。
+脚本已改成按墙钟截断读取（scratchpad `diag_watch.py` / `diag_pod.py`）。
+
+**推理**：输出与 seed、提示词、时长、LoRA 强度全部无关，且 5 秒和 15 秒的噪声统计完全一样，
+说明送进 VAE 的潜变量是全零/NaN（VAE 解码零潜变量正是这种灰褐色细纹理）；音频同样。
+即 DiT 输出被整体毁掉。FP8 完成但出零，bf16 直接挂——两者共同点是 **sage_attn + 逐层卸载 + H3**。
+H3 的注意力是 GQA 打包 QKV（`num_query_groups`、`_reorder_grouped_qkv_to_qkv`），Wan 是 MHA；
+Wan 在同一批卡上 FP8 + sage 出片正常。所以 **SageAttention（SM 12.0 自编译）对 H3 的 GQA 路径**
+是现在最贴合所有现象的嫌疑；其次是逐层卸载与 FP8 的组合（官方文档只在 resident 档验证过 FP8）。
+
+**已做的修复（正确但不够）**：
+- 提交 `9dbed39`：`worker_config.lora_metadata_alpha()` 从 safetensors 头读 alpha，handler 自动传
+  `lora_alpha`（`H3_TURBO_LORA_ALPHA` 仍可覆盖），结果元数据新增 `turbo_lora_alpha`；`H3_FLOW_SHIFT` 默认 6.0。
+  镜像还没重建；模板 `np5uig5uvg`（FP8）和 `e33gscwiq1`（bf16，**会挂死，别用**）用 env 显式给了 alpha 8 / shift 6。
+- Railway：`RUNPOD_H3_POD_TEMPLATE_ID=np5uig5uvg`，`H3_ENABLED=0`（部署 `baefb3bd`）。
+  H3 在下拉里禁用、提交返回 503，直到画面修好再打开。Wan/LTX 不受影响。
+
+**下一步（新会话，按顺序，每步一个变量）**：
+1. `H3_ATTENTION_BACKEND=torch_sdpa`，其余同 `np5uig5uvg`。用 scratchpad 的
+   `DIAG_DCS="US-NC-1,US-NC-2" no_proxy='*' python3 diag_create.py '{"H3_ATTENTION_BACKEND":"torch_sdpa"}' sdpa`
+   建 Pod，再 `no_proxy='*' python3 diag_watch.py <pod> sdpa 3000` 看护（已修好读日志的阻塞）。
+   成片用 `ffmpeg -ss 2 -i x.mp4 -frames:v 1 f.png` 抽帧看，别只看回调状态。
+2. 若仍噪声：关 PinkCherry（`H3_NSFW_TRANSFORMER_ENABLED=0`、`INCLUDE_STOCK_TRANSFORMER=1`，多下 66 GB）。
+3. 若仍噪声：拿 sglang cookbook 的 2×5090 bf16 逐层卸载配方原样跑（不加 LoRA、不加 PinkCherry、
+   `--attention-backend` 用默认），先证明这个镜像在这张卡上能出任何一张正常画面。
+4. 修好后：把 `H3_ENABLED=1`、切模板、跑一次 web 提交并**抽帧验收**，再把 `e33gscwiq1` 删掉。
+
+## 十五、本机网络：系统代理 127.0.0.1:8080 时断时续，这才是「视频打开慢」的原因
+
+`scutil --proxy` 显示这台 Mac mini 配了 HTTP/HTTPS 系统代理 `127.0.0.1:8080`，
+排查时它的端口是**关闭**的。Chrome 和 Python urllib 都走系统代理（curl 不走），所以：
+- 代理挂掉时浏览器/urllib 连 Railway、RunPod API 都会 Connection refused / reset
+  （本会话里 Monitor 进程建 Pod 失败、任务列表被重置都是它）；
+- 代理活着时走它的出口带宽很差：视频文件在代理时好时坏的间隙里只能拉到 5–50 KB/s，
+  直连（curl）在好的时候约 1 MB/s、坏的时候 47 KB/s，Cloudflare 基准也只有 1.3 MB/s，
+  说明瓶颈是本地出海链路，不是 Railway。
+- Railway 本身没有 CDN，媒体文件由控制面容器直接回源（`x-railway-edge: sjc1`），
+  支持 Range（206）；输出 mp4 **不是 faststart**（`ftyp free mdat … moov` 在末尾），
+  浏览器要先取尾部 moov 再回头取正文，慢链路上多两次往返。
+
+**建议**（未实施）：worker 输出时统一 `ffmpeg -c copy -movflags +faststart` 重封装
+（`_strip_audio` 分支已经这么做，`generate_audio=true` 分支只是 `rename`）；
+真要给国内用户稳定播放，把成片放到带 CDN 的对象存储（Cloudflare R2 + 自定义域名最省事，
+BytePlus TOS 也可以但 NSFW 内容在国内云上有合规风险）。
+脚本侧：本机跑 urllib 一律 `no_proxy='*'`，免得被半死的代理拖住。
