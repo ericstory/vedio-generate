@@ -193,18 +193,18 @@ def test_h3_residency_profile_tracks_the_card_it_lands_on() -> None:
     exec("from typing import Any\n" + source[start:end], namespace)
     profile = namespace["residency_profile"]
 
-    resident = profile(96.0)
-    assert resident["performance_mode"] == "speed"
-    assert resident["dit_layerwise_offload"] is False
-
+    # Full residency OOMed on the 96 GB card (SGLang keeps H3 resident only
+    # above 120 GB), so every tier streams the same three groups and only the
+    # number of resident DiT layers grows with the card.
+    big = profile(96.0)
     mid = profile(48.0)
-    assert mid["performance_mode"] == "memory"
-    assert mid["layerwise_offload_components"] == ["dit", "text_encoder"]
-
     small = profile(32.0)
-    assert small["performance_mode"] == "memory"
-    assert small["layerwise_offload_components"] == ["dit", "text_encoder", "vae"]
+    for tier in (big, mid, small):
+        assert tier["performance_mode"] == "memory"
+        assert tier["layerwise_offload_components"] == ["dit", "text_encoder", "vae"]
+        assert 0 < tier["dit_layerwise_resident_layers"] <= 50
     assert small["dit_layerwise_resident_layers"] < mid["dit_layerwise_resident_layers"]
+    assert mid["dit_layerwise_resident_layers"] < big["dit_layerwise_resident_layers"]
 
     # The 32B text encoder never fits beside the DiT in BF16, on any tier.
     for vram in (96.0, 48.0, 32.0, 24.0):

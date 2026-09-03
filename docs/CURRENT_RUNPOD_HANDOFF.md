@@ -408,3 +408,22 @@ RuntimeError: Failed to set LoRA adapter: The size of tensor a (21504) must matc
 `data.add_(B@A)`），而在线 FP8 量化后的权重是转置布局（`qkv_proj` 变成 [5376, 21504]），
 合并代码没有处理。**修复**：`H3_LORA_MERGE_MODE=dynamic`——LoRA 作为运行时增量叠加在
 `quant_method.apply()` 之后，与量化方法无关。先经模板跑第七次，代码默认值同步改。
+
+### 第七次真实出片（2026-09-03 04:51Z，Pod `gx93uotdfjnmp3`，US-PA-1）：OOM
+
+**模型、FP8、PinkCherry、动态 LoRA 全部就位，`video_start` 已回调，进入推理**，然后：
+
+```
+CUDA out of memory. Tried to allocate 250.00 MiB. GPU 0 has a total capacity of 94.97 GiB ... 89.06 GiB is allocated by PyTorch
+```
+
+账算得过来：在线 FP8 只量化线性层，PinkCherry DiT 常驻约 47GB（其中 26GB 是 bf16 的 AdaLN）；
+video VAE 按 sglang 配置 fp32 常驻约 21GB；`text_encoder_cpu_offload` 走 FSDP CPU offload，
+前向时 all-gather 到 GPU。sglang 自己的 H3 部署配置写明 `keep_resident_min_available_gb=120`，
+参考部署是 4 卡——**单张 96GB 本来就不该全常驻**，handler 里的 96GB "speed" 档是拍脑袋的。
+
+**修复**：三个组件组（`dit`、`text_encoder`、`vae`）全部逐层流式，DiT 保留 25 层常驻
+（50 层，约 0.95GB/层），预取 2 层，`performance_mode=memory`。注意 sglang 的 `from_kwargs`
+把**传入的每个键**都记为显式设置（值为 null 也算），所以想让它 auto 决策不能靠 JSON 传 null；
+显式 `layerwise_offload_components` 的优先级高于旧的 `*_cpu_offload` 开关，直接给方案最稳。
+先经模板跑第八次，代码里三个档位同步改（48GB/32GB 档是按比例缩的猜测，未实测）。

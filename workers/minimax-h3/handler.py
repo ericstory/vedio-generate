@@ -225,34 +225,42 @@ def residency_profile(total_vram_gb: float) -> dict[str, Any]:
     smaller plans mirror the published SGLang consumer recipes and are not
     something we have timed ourselves.
     """
+    # What the seventh real run measured on a 96 GB RTX PRO 6000: with the
+    # DiT fully resident, generation OOMed at 89 GB allocated. Online FP8 only
+    # quantises the linear layers, so PinkCherry still holds ~47 GB (26 GB of
+    # it is bf16 AdaLN), the video VAE is fp32-resident (~21 GB) and the
+    # encoder's CPU-offload path all-gathers onto the GPU. SGLang's own H3
+    # deployment config keeps everything resident only above 120 GB.
+    #
+    # So every tier streams the three big groups layer by layer and differs
+    # only in how many of the 50 DiT layers (~0.95 GB each) stay resident.
+    # 25 on the 96 GB tier is the first plan that produced a video; the
+    # smaller tiers are scaled guesses that nothing has timed yet. Explicit
+    # layerwise selection outranks the legacy *_cpu_offload flags in SGLang's
+    # residency resolution, so the flags below only document intent.
     if total_vram_gb >= 80:
-        # Resident DiT. The 32B text encoder never fits alongside it in BF16,
-        # so it streams from host memory on every tier.
         return {
-            "performance_mode": "speed",
-            "dit_cpu_offload": False,
-            "dit_layerwise_offload": False,
+            "performance_mode": "memory",
+            "layerwise_offload_components": ["dit", "text_encoder", "vae"],
+            "dit_offload_prefetch_size": 2,
+            "dit_layerwise_resident_layers": 25,
             "text_encoder_cpu_offload": True,
             "vae_cpu_offload": False,
         }
     if total_vram_gb >= 40:
-        # 48 GB class: the quantized DiT fits but leaves little room for 768p
-        # activations, so keep most layers resident and stream the tail.
         return {
             "performance_mode": "memory",
-            "layerwise_offload_components": ["dit", "text_encoder"],
+            "layerwise_offload_components": ["dit", "text_encoder", "vae"],
             "dit_offload_prefetch_size": 1,
-            "dit_layerwise_resident_layers": 30,
+            "dit_layerwise_resident_layers": 10,
             "text_encoder_cpu_offload": True,
-            "vae_cpu_offload": False,
+            "vae_cpu_offload": True,
         }
-    # 32 GB class and below: follow the shape of the published 1x RTX 4090
-    # recipe, with a few more resident layers than a 24 GB card can afford.
     return {
         "performance_mode": "memory",
         "layerwise_offload_components": ["dit", "text_encoder", "vae"],
         "dit_offload_prefetch_size": 1,
-        "dit_layerwise_resident_layers": 8,
+        "dit_layerwise_resident_layers": 4,
         "text_encoder_cpu_offload": True,
         "vae_cpu_offload": True,
     }
