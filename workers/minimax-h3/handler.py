@@ -309,6 +309,18 @@ def _generator() -> DiffGenerator:
             "trust_remote_code": True,
             "num_gpus": 1,
             "attention_backend": ATTENTION_BACKEND,
+            # The global backend applies to every attention layer, and SGLang's
+            # Qwen3-VL encoder and H3 audio VAE only accept fa/torch_sdpa (the
+            # fifth real run died on exactly that ValueError). FlashAttention
+            # has no SM 12.0 wheels, so those small components run on SDPA
+            # while the DiT -- where attention cost actually lives -- keeps the
+            # configured backend. SGLang only applies this rule by itself for
+            # LTX2.
+            "component_attention_backends": {
+                "text_encoder": "torch_sdpa",
+                "audio_vae": "torch_sdpa",
+                "video_vae": "torch_sdpa",
+            },
             "pin_cpu_memory": True,
             "enable_torch_compile": False,
             "warmup_mode": "off",

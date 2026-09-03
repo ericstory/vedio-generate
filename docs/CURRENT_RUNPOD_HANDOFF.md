@@ -381,3 +381,17 @@ H3 的 `MiniMaxH3PipelineConfig` 只被借走一个 `task_type`。`model_id` 参
 
 到此为止 sglang 的加载契约总结：`model_path=<…>/MiniMaxAI/MiniMax-H3`（根，不是分区）+
 `model_variant=fl2va` + `pipeline_class_name=MiniMaxH3Pipeline` + `trust_remote_code=True`。
+
+### 第五次真实出片（2026-09-03 04:14Z，Pod `gt6qi0b1s8oxh2`，US-NC-1）：注意力后端
+
+目录名修复后 sglang 正确选中原生 H3 配置，倒在加载文本编码器：
+
+```
+ValueError: Attention backend 'sage_attn' is not supported by this attention layer; supported backends: ['fa', 'torch_sdpa']
+RuntimeError: Failed to load customized text_encoder; native fallback is disabled for this component configuration.
+```
+
+`attention_backend` 是全局的；Qwen3-VL 编码器和 H3 audio VAE 的注意力层只接受 `fa`/`torch_sdpa`
+（DiT 没有限制，video VAE 也没有）。sglang 只对 LTX2 自动把 text_encoder 设成 torch_sdpa。
+**修复**：`component_attention_backends={"text_encoder":"torch_sdpa","audio_vae":"torch_sdpa","video_vae":"torch_sdpa"}`，
+DiT 保持 `sage_attn`。先经模板 `H3_EXTRA_SERVER_ARGS_JSON` 注入跑第六次，代码默认值同步提交。

@@ -331,3 +331,13 @@ def test_h3_snapshot_root_mirrors_the_hf_repo_id() -> None:
     assert "MiniMax-H3-PinkCherry" not in handler
     assert "MiniMax-H3-PinkCherry" not in download
     assert 'PIPELINE_ROOT.name.lower() != "minimax-h3"' in handler
+
+
+def test_h3_only_the_dit_runs_on_the_fast_attention_backend() -> None:
+    """SGLang's Qwen3-VL encoder and H3 audio VAE reject sage_attn outright."""
+    source = (WORKER_ROOT / "handler.py").read_text(encoding="utf-8")
+    block = source[source.index('"component_attention_backends"'):]
+    block = block[: block.index("}")]
+    for component in ("text_encoder", "audio_vae", "video_vae"):
+        assert f'"{component}": "torch_sdpa"' in block
+    assert '"transformer"' not in block
