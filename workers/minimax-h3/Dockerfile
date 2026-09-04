@@ -55,6 +55,6 @@ RUN nvcc --version \
     && python -c "import sageattention"
 
 WORKDIR /app
-COPY handler.py worker_config.py smoke.py download_models.py download_models.sh /app/
+COPY handler.py worker_config.py smoke.py download_models.py download_models.sh regroup_qkv.py /app/
 RUN chmod 0755 /app/download_models.sh
 CMD ["python", "/app/handler.py"]

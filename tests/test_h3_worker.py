@@ -382,3 +382,58 @@ def test_h3_handler_passes_the_export_alpha_and_the_distillation_shift() -> None
     # Distilled at video shift 6 / audio shift 3; 12 was never a recipe.
     assert 'FLOW_SHIFT = float(os.getenv("H3_FLOW_SHIFT", "6.0"))' in source
     assert 'AUDIO_FLOW_SHIFT = float(os.getenv("H3_AUDIO_FLOW_SHIFT", "3.0"))' in source
+
+
+def _load_regroup():
+    spec = importlib.util.spec_from_file_location("h3_regroup_qkv", WORKER_ROOT / "regroup_qkv.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _tiny_safetensors(path: Path, tensors: dict[str, tuple[list[int], bytes]]) -> None:
+    import struct
+
+    header: dict = {}
+    blob = b""
+    for name, (shape, data) in tensors.items():
+        header[name] = {"dtype": "BF16", "shape": shape, "data_offsets": [len(blob), len(blob) + len(data)]}
+        blob += data
+    encoded = json.dumps(header).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + blob)
+
+
+def test_pinkcherry_qkv_rows_are_regrouped_per_head_in_place(tmp_path: Path) -> None:
+    """[q_all, k_all, v_all] -> [q_0, k_0, v_0, q_1, k_1, v_1]; other tensors untouched."""
+    regroup = _load_regroup()
+    heads, head_dim, cols = 2, 1, 2  # one bf16 row = 4 bytes; rows tagged by their index
+    row = lambda i: bytes([i, 0, i, 0])
+    standard = b"".join(row(i) for i in range(3 * heads * head_dim))  # q0 q1 k0 k1 v0 v1
+    other = bytes(range(8))
+    path = tmp_path / "pc.safetensors"
+    _tiny_safetensors(
+        path,
+        {"blocks.0.attn.qkv_proj.weight": ([6, cols], standard), "blocks.0.mlp.fc1.weight": ([2, cols], other)},
+    )
+    assert regroup.regroup_qkv_in_place(path, heads=heads, head_dim=head_dim) == 1
+    import struct
+
+    raw = path.read_bytes()
+    n = struct.unpack("<Q", raw[:8])[0]
+    header = json.loads(raw[8 : 8 + n])
+    a, b = header["blocks.0.attn.qkv_proj.weight"]["data_offsets"]
+    grouped = raw[8 + n + a : 8 + n + b]
+    assert grouped == b"".join(row(i) for i in (0, 2, 4, 1, 3, 5))  # q0 k0 v0 q1 k1 v1
+    a2, b2 = header["blocks.0.mlp.fc1.weight"]["data_offsets"]
+    assert raw[8 + n + a2 : 8 + n + b2] == other
+    # A second run must be a no-op, otherwise the rows get scrambled back.
+    assert regroup.regroup_qkv_in_place(path, heads=heads, head_dim=head_dim) == 0
+    assert path.read_bytes() == raw
+
+
+def test_h3_download_regroups_pinkcherry_and_ships_the_module() -> None:
+    download = (WORKER_ROOT / "download_models.py").read_text(encoding="utf-8")
+    dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "regroup_qkv_in_place(nsfw_path)" in download
+    assert "regroup_qkv.py /app/" in dockerfile

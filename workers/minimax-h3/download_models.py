@@ -20,6 +20,8 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
+from regroup_qkv import regroup_qkv_in_place
+
 
 BASE_REPO = "MiniMaxAI/MiniMax-H3"
 BASE_REVISION = "42ed227ee7df40d41602854ae760620d6eb651fe"
@@ -85,8 +87,13 @@ def main() -> int:
     )
     destination = root / "pinkcherry"
     destination.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(staging / NSFW_FILE), str(destination / Path(NSFW_FILE).name))
+    nsfw_path = destination / Path(NSFW_FILE).name
+    shutil.move(str(staging / NSFW_FILE), str(nsfw_path))
     shutil.rmtree(staging, ignore_errors=True)
+    # The export stores fused QKV as [q_all, k_all, v_all]; SGLang's H3 loader
+    # expects the stock per-head grouping. See regroup_qkv.py for the evidence.
+    regrouped = regroup_qkv_in_place(nsfw_path)
+    print(f"Regrouped {regrouped} PinkCherry qkv tensors into per-head layout", flush=True)
 
     # Plain exports only: those carry key_format=minimax-h3-diffusers and the
     # training alpha in safetensors metadata, which is the form the SGLang
