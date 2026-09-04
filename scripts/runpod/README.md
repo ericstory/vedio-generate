@@ -14,4 +14,5 @@ otherwise urllib hangs on 127.0.0.1:8080.
 | `pods.py list|delete <id>…` | List or delete Pods. |
 | `cleanup_runpod.py [--yes] [--ltx-serverless]` | Handoff step 8: delete the residual serverless endpoints and the volumes nothing mounts. Dry run without `--yes`; refuses to touch the LTX production endpoint/volume or the Wan Pod lane volumes unless `--ltx-serverless` is passed (step 9, after the LTX Pod lane has produced a real video). |
 | `h3_submit_and_follow.py [prompt] [seconds]` | Submit through the production API and follow the task to a terminal state. `MODEL=pinkcherry-ltx-2.3-v1.8 RESOLUTION=480p` targets the LTX lane. |
+| `follow_task.py <task-id> [--once]` | Follow an existing task (`MAX_SECONDS` bounds the wait). Pair with `FOLLOW=0` on the submit script when the follower must run in bounded foreground chunks. |
 | `fetch_and_inspect_video.sh <name> <media-uuid>` | Download a result with resume, then print luma/audio stats and write frames. **Always look at frames: a succeeded callback proved nothing on 2026-09-03.** |

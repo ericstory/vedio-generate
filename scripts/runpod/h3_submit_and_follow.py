@@ -36,6 +36,7 @@ fields={
 t0=time.time(); r=post_form("/api/tasks",fields); dt=time.time()-t0
 if "err" in r: print("SUBMIT FAILED:",r); sys.exit(1)
 tid=r["task"]["id"]; print(f"task: {tid}  status={r['task']['status']}  pod={r['task'].get('provider_task_id')!r}  submit took {dt:.2f}s",flush=True)
+if os.environ.get("FOLLOW","1")=="0": sys.exit(0)  # FOLLOW=0: submit only, follow with follow_task.py
 last=None; errs=0; start=time.time()
 while time.time()-start<3000:
     time.sleep(10)

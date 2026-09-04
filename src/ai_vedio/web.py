@@ -936,7 +936,10 @@ def _tend_pod_lane(
                 {
                     "status": "failed",
                     "content": {},
-                    "error": f"{label} GPU Pod exceeded the 30 minute cost limit",
+                    "error": (
+                        f"{label} GPU Pod exceeded the "
+                        f"{int(round(settings.maximum_runtime_seconds / 60))} minute cost limit"
+                    ),
                 },
             )
             continue

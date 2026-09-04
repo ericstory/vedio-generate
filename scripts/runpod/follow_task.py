@@ -18,7 +18,8 @@ def login():
     post_json("/api/login",{"username":V["ADMIN_USERNAME"].strip(),"password":V["ADMIN_PASSWORD"].strip()})
 tid=sys.argv[1]; once="--once" in sys.argv
 login(); last=None; errs=0; start=time.time()
-while time.time()-start<3600:
+MAX=float(os.environ.get("MAX_SECONDS","3600"))
+while time.time()-start<MAX:
     try: tasks=get("/api/tasks")
     except Exception as e:
         errs+=1

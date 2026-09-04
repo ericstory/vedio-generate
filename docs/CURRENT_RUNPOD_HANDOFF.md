@@ -14,11 +14,13 @@ PinkCherry 的 QKV 融合权重行布局与 sglang 加载器的假设不一致�
 第 8 步的卷与 serverless endpoint 清理做成了 `scripts/runpod/cleanup_runpod.py`（dry-run 默认），
 **待用户执行 `--yes`**（自动模式的分类器不允许 Claude 自己删）。
 
-**2026-09-04 第三轮（第十七节）**：第 9 步「LTX 迁 Pod 链路」代码就位（控制面第三条 Pod 链路 + LTX worker
-拉活/回调/开机下载），124 个测试全过，**待 CI 出镜像 → 建模板 → Railway 开 `LTX_POD_ENABLED=1` → 真实出片抽帧**；
-第 7 步 10Eros Max 做完零成本核验（QKV 布局同 PinkCherry、缺 time_embedder、还原公式），未动手还原。
+**2026-09-04 第三轮（第十七节）：第 9 步「LTX 迁 Pod 链路」已上线并验收通过。** 模板 `cbj3cbaipw`，
+Railway `LTX_POD_ENABLED=1`；两条真实任务（480p/4 s 冷启动 74.6 s 全程、720p/6 s 复用热 Pod 78 s 提交到成片）
+抽帧均为真实画面。第一次尝试落在 EUR-IS-2 拉镜像超过一小时，由此加了 volume-free 链路的**机房偏好**
+（`RUNPOD_<LANE>_POD_PREFERRED_DATA_CENTER_IDS`，H3/LTX 都设 `US-NC-1,US-NC-2,US-PA-1`）。
+第 7 步 10Eros Max 做完零成本核验，未动手还原。
 
-**下一步：第十七节的「部署与验收步骤」。**
+**下一步：用户自跑第十七节末尾的清理（删 LTX serverless endpoint 与卷），然后第 7 步 10Eros Max。**
 
 ---
 
@@ -265,8 +267,8 @@ HF token 已在 Railway 变量里，权限够。
    6 个卷（760GB ≈ $53/月）；保留 LTX 生产 endpoint `aoma1602mogius` 及其卷 `fn6at7unxa`、
    Wan Pod 链路的 `3xl6dvrx0p`/`nv7g5aobqn`。Railway 上 `RUNPOD_WAN_ENDPOINT_ID`、
    `RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID` 两个变量指向已删资源，删法见第十六节待办。
-9. V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）——
-   **代码就位（第十七节），待部署验收**
+9. ~~V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）~~ ✅ 2026-09-04 上线并验收（第十七节）；
+   剩 serverless endpoint/卷的删除（用户自跑）
 
 ---
 
@@ -773,7 +775,7 @@ RunPod 运行中 Pod 归零。Pod 总寿命约 25.5 分钟 ≈ $0.89，其中空
    `railway variable delete RUNPOD_WAN_ENDPOINT_ID` → `railway variable delete RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID`
    → `railway up --detach`。变量删不删都不影响功能：守卫只会对着不存在的 Wan endpoint 多报几次被吞掉的 404。
 2. 删上一版模板 `4af0xgv6zs`（保温模板已验过）。
-3. ~~第 9 步（LTX 迁 Pod 链路）~~ 代码就位，部署验收见第十七节；第 7 步（10Eros Max）核验结论也在第十七节。
+3. ~~第 9 步（LTX 迁 Pod 链路）~~ ✅ 已上线验收（第十七节）；第 7 步（10Eros Max）核验结论也在第十七节。
 4. 可选：模板里 `H3_SECONDS_PER_MPIXEL_STEP=0.13` 让 15 秒的投影准一点（只影响显示，不影响守卫判断）。
 
 ## 十七、2026-09-04 第三轮：LTX 迁 Pod 链路（代码就位，待部署验收）；10Eros Max 零成本核验
@@ -850,6 +852,33 @@ volume-free 链路先按顺序试偏好机房（每个机房 × 每张候选卡�
 生产值 `US-NC-1,US-NC-2,US-PA-1`（H3 十几次出片都在这几处，NC-1 拉 14 GB 约 1 分钟），H3 与 LTX 两条链路都设。
 **留给下一步的想法**：更精细的守卫是「`pod_created` 后 N 分钟没有 `gpu_probe` 就删 Pod 换机器」，
 比运行上限便宜得多；LTX 的运行上限暂留 3600（长视频链路，卡死最多白烧 $2）。
+
+### 验收（2026-09-04 08:01–08:10Z，机房偏好部署 `7e486922` 生效后）
+
+| | 任务 A `42ea24ee`（480p/4 s，16:9） | 任务 B `6aa4e840`（720p/6 s，A 成功后约 5 分钟提交） |
+| --- | --- | --- |
+| 拿到 GPU | 5.3 s，第 1 次申请即成功，Pod `0d5ibujdterh5c`，**US-NC-1** | **复用同一个 Pod**：提交后 4 s 已在 `video_start`（`pod_reused=true`） |
+| 下权重 79 GB / 装模型 | **33.0 s** / 0.07 s（pipeline 构造是惰性的，真正加载算在推理里） | 0 / 0 |
+| 推理（20 步 + 3 步两阶段，含 Gemma 编码） | 40.6 s（768×448，97 帧） | 68.5 s（1280×704，145 帧） |
+| handler 全程 / 提交 → 成片 | 74.6 s / 约 3.5 分钟（含拉镜像约 1 分钟） | 69.2 s / **78 s** |
+| 峰值显存 | 24,982 MB | 24,982 MB |
+| 抽帧 | 日落海滩、海浪与人影，音频 −29.4 dB 均值 | 雪松林小跑的狐狸，音频 −23.4 dB 均值 |
+
+对照：A/B 记录里同规格 4 s/480p 在 serverless 卷上是 370 s handler 时间，现在 74.6 s——差的就是网络卷读权重的时间。
+输出 `/generate/media/482ea502-…` 与 `/generate/media/6da60463-…`。**媒体路由需要登录态**，`fetch_and_inspect_video.sh`
+裸 curl 只拿到 25 字节；抽帧用带 cookie 的下载（见 `follow_task.py` 同款 login）。运行上限的错误文案改为按配置值显示
+（之前写死「30 minute」，3600 的配置下报错文案会撒谎）。
+
+**保温**：B 结果落库 08:09:48Z，Pod `0d5ibujdterh5c` 在 08:19:45–08:20:14Z 之间被守卫按 600 s 空闲删除，RunPod 运行中 Pod 归零。
+
+**成本**：第一次卡在 EUR-IS-2 的 Pod 约 $2.09 白烧；第二个 Pod A+B+保温窗口约 20 分钟 ≈ $0.70。
+
+### 收尾（用户自跑，分类器不让 Claude 删）
+
+1. `no_proxy='*' python3 scripts/runpod/cleanup_runpod.py --ltx-serverless`（dry-run 看清单）
+   → 加 `--yes` 删 endpoint `aoma1602mogius` 与卷 `fn6at7unxa`（≈$7/月，最后一个 serverless endpoint）。
+2. `railway variable delete RUNPOD_ENDPOINT_ID` → `railway up --detach`（删不删都不影响功能，守卫已按变量存在与否决定是否轮询）。
+3. 之后 `.env.example` 顶部的 serverless LTX 块可以整段删掉，`RunPodClient`（serverless）只剩历史行会用到。
 
 ### 10Eros Max（第九节第 7 步）零成本核验结论
 
