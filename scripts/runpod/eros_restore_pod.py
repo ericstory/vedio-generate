@@ -74,30 +74,60 @@ python3 /work/restore_pruned_adaln.py \
 echo "STAGE restored $(ls -l /work/out | tail -1) disk_free=$(df -BG /work | awk 'NR==2{print $4}')"
 rm -rf /work/in
 python3 - <<'PY'
-import os
+import os, time, traceback
 from huggingface_hub import HfApi
 api = HfApi()
 local = "/work/out/" + os.path.basename(os.environ["TARGET_FILE"])
-info = api.upload_file(path_or_fileobj=local, path_in_repo=os.environ["TARGET_FILE"], repo_id=os.environ["TARGET_REPO"],
-                       commit_message="Restore 10Eros Max beta4 full AdaLN + per-head QKV for SGLang (papa " + os.environ["PAPA_GIT_SHA"][:7] + ")")
-print("STAGE uploaded", info.commit_url, flush=True)
+message = "Restore 10Eros Max beta4 full AdaLN + per-head QKV for SGLang (papa " + os.environ["PAPA_GIT_SHA"][:7] + ")"
+# The first run's single attempt died at 66 GB with a transient xet
+# "error decoding response body". Xet deduplicates on the server, so a retry
+# only re-sends the chunks that did not land; the high-performance mode is
+# dropped after the first failure in case its concurrency is what tripped.
+for attempt in range(1, 9):
+    try:
+        info = api.upload_file(path_or_fileobj=local, path_in_repo=os.environ["TARGET_FILE"], repo_id=os.environ["TARGET_REPO"], commit_message=message)
+        print("STAGE uploaded", info.commit_url, flush=True)
+        break
+    except Exception:
+        print(f"STAGE upload_retry attempt={attempt}", flush=True)
+        traceback.print_exc()
+        os.environ.pop("HF_XET_HIGH_PERFORMANCE", None)
+        time.sleep(min(60 * attempt, 300))
+else:
+    raise SystemExit("upload failed after 8 attempts")
 print("STAGE revision", api.model_info(os.environ["TARGET_REPO"]).sha, flush=True)
 PY
 echo "STAGE done $(date -u +%FT%TZ)"
 INNER
-timeout 18000 bash /inner.sh
-code=$?
+# RunPod restarts an exited container on the same disk. A second pass must not
+# redo (or, on a full disk, re-fail) the job; it goes straight to the delete.
+if [ -e /work/.attempted ]; then
+  echo "STAGE restarted_container: skipping to self-delete"; code=1
+else
+  mkdir -p /work && touch /work/.attempted
+  timeout 18000 bash /inner.sh
+  code=$?
+fi
 echo "STAGE exit code=$code $(date -u +%FT%TZ)"
 if [ "$code" -ne 0 ]; then echo "STAGE grace 900s before self-delete"; sleep 900; fi
-python3 - <<'PY'
-import os, urllib.request
-req = urllib.request.Request("https://rest.runpod.io/v1/pods/" + os.environ["RUNPOD_POD_ID"], method="DELETE",
-                             headers={"Authorization": "Bearer " + os.environ["RUNPOD_API_KEY"]})
-try:
-    print("STAGE self_delete", urllib.request.urlopen(req, timeout=60).status, flush=True)
-except Exception as exc:
-    print("STAGE self_delete_failed", exc, flush=True)
-PY
+# No heredoc here: the second Pod filled its disk, bash could not spool the
+# heredoc to a temp file, and the delete silently never ran while RunPod
+# restarted the exited container every 16 minutes on the meter.
+python3 -c 'import os, time, urllib.request
+pod = os.environ["RUNPOD_POD_ID"]
+headers = {"Authorization": "Bearer " + os.environ["RUNPOD_API_KEY"], "User-Agent": "papa/1.0"}
+for attempt in range(6):
+    for url in ("https://rest.runpod.io/v1/pods/" + pod, "https://api.runpod.io/v2/pods/" + pod):
+        try:
+            status = urllib.request.urlopen(urllib.request.Request(url, method="DELETE", headers=headers), timeout=60).status
+            print("STAGE self_delete", url, status, flush=True)
+            raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print("STAGE self_delete_failed", url, exc, getattr(exc, "read", lambda: b"")()[:200], flush=True)
+    time.sleep(30)
+'
 sleep 60
 """
 
