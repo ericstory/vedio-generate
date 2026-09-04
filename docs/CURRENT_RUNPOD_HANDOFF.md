@@ -9,7 +9,12 @@ PinkCherry 的 QKV 融合权重行布局与 sglang 加载器的假设不一致�
 元数据 `turbo_lora_alpha=8`、`flow_shift=6.0`，抽帧是真实画面。
 留一个原版 transformer 的应急模板 `vqnyih9ibx`（无 PinkCherry）。运维脚本在 `scripts/runpod/`。
 
-**下一步：第九节 5b（常驻层数）、第 6 步（保温）、第 8 步剩余清理（卷、serverless endpoint）。**
+**2026-09-04 第二轮（第十六节）**：5b 实测常驻层数 25→40 零收益，默认值不动；第 6 步保温已实现
+（提交 `53d64ed`，控制面 + worker 拉取式作业 + 空闲 10 分钟自动删 Pod），部署与验收状态见第十六节；
+第 8 步的卷与 serverless endpoint 清理做成了 `scripts/runpod/cleanup_runpod.py`（dry-run 默认），
+**待用户执行 `--yes`**（自动模式的分类器不允许 Claude 自己删）。
+
+**下一步：第十六节末尾的「待办」。**
 
 ---
 
@@ -244,18 +249,17 @@ HF token 已在 Railway 变量里，权限够。
 5. ~~用实测填 `H3_SECONDS_PER_MPIXEL_STEP` 打开超时守卫~~ ✅ 2026-09-03 模板 `jkrh512m3s`
    填 `0.1`（实测 108.4 秒 ÷（1.032 MP × 120 帧 × 9 步）= 0.097 s/(MP·帧·步)；
    768p 15 秒 360 帧投影 324 秒，远在 1500 秒预算内）
-5b. 显存还有 50GB 余量（峰值 45.6 / 95），`dit_layerwise_resident_layers` 可以从 25 往 40 提，
-   每提一层少流一层权重；每次改完看返回的 `peak_memory_mb`。**没动**，
-   留给下一轮单独调（和 5c 混在一起就分不清是谁的功劳）
+5b. ~~显存还有 50GB 余量，`dit_layerwise_resident_layers` 从 25 往 40 提~~ ✅ 2026-09-04 实测**零收益**，
+   默认值保持 25（第十六节）
 5c. ~~用最新 SHA 的镜像建一个不带 `H3_EXTRA_SERVER_ARGS_JSON` 的模板验一次~~ ✅ 见第十三节
 5d. ~~web 端稳定创建任务：提交先入队、守卫循环申请 GPU~~ ✅ 提交 `79dec8f`，见第十三节
-6. 保温（拉取式 worker + 自动空闲超时）
+6. ~~保温（拉取式 worker + 自动空闲超时）~~ ✅ 提交 `53d64ed`，见第十六节（部署/验收状态也在那）
 7. 10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力
-8. 清理：删 9 个卷（省 $70/月）、闲置模板（迭代留下的 `5hwjktbaa2`、`sx4pndyt2r`、
-   `kdf3q6n3i4`、`v3waitxptu`、`7xnj6d52vv`、`lpalzoy70e`、`02hdqp64b1` 都可删，**现役是 `jkrh512m3s`**）、
-   5 个残留 serverless endpoint。
-   ⚠️ **LTX 的 NE-1 卷 `fn6at7unxa` 不能删**——生产 endpoint `aoma1602mogius`
-   还挂着它，要等 V1 迁到 Pod 链路之后
+8. 清理：~~闲置 H3 模板~~ ✅（第十四节收尾）；**卷与 serverless endpoint 待用户跑
+   `python3 scripts/runpod/cleanup_runpod.py --yes`**（先不带 `--yes` 看 dry-run）。脚本删 5 个残留
+   endpoint 和 6 个无人引用的卷（760GB ≈ $53/月），保留 LTX 生产 endpoint `aoma1602mogius` 及其卷
+   `fn6at7unxa`、Wan Pod 链路的 `3xl6dvrx0p`/`nv7g5aobqn`（Railway 变量还在用）。
+   删完再 `railway variable delete RUNPOD_WAN_ENDPOINT_ID RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID`。
 9. V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）
 
 ---
@@ -669,3 +673,69 @@ bf16 + 逐层卸载为什么挂死（生产不用 bf16，先不追）。
 真要给国内用户稳定播放，把成片放到带 CDN 的对象存储（Cloudflare R2 + 自定义域名最省事，
 BytePlus TOS 也可以但 NSFW 内容在国内云上有合规风险）。
 脚本侧：本机跑 urllib 一律 `no_proxy='*'`，免得被半死的代理拖住。
+
+## 十六、2026-09-04 第二轮：5b 常驻层数实测、保温（keep-warm）落地、第 8 步清理脚本
+
+### 5b：`dit_layerwise_resident_layers` 25→40 零收益，默认值不动
+
+诊断 Pod `3ttzk680xe2wsx`（US-NC-2，现役模板 `4af0xgv6zs` + 模板 env
+`H3_EXTRA_SERVER_ARGS_JSON={"dit_layerwise_resident_layers": 40}`，768p/5 秒，约 $0.35）：
+
+| 指标 | 25 层（第八/九次出片、`8cc52ce5`） | 40 层（本次） |
+| --- | --- | --- |
+| sglang `server_args` 里的常驻层数 | 25 | **40**（覆盖确实生效） |
+| 推理 `video_inference_seconds` | 108.4 / 108.5 / 110.8 | **111.0** |
+| 模型加载 | 134.0 / 123.9 | 133.3 |
+| `peak_memory_mb` | 45,616 | **45,616（逐字节相同）** |
+
+结论：`dit_offload_prefetch_size=2` 已经把逐层传输完全遮住，多常驻 15 层既不提速也不改变峰值
+（峰值一样说明这个参数在当前逐层卸载配置下对分配没有影响，很可能被 sglang 忽略了）。
+**不值得再花钱追**；`residency_profile` 保持 25，注释里记了这次数据。
+顺带一个坑：handler 打印的 `residency_profile` 是覆盖**之前**的值，看是否生效要看后面那行 `server_args`。
+
+### 保温（第九节第 6 步）：实现（提交 `53d64ed`）
+
+设计不变（用户选 A：纯自动空闲超时；worker 向控制面轮询，不开入站端口，复用回调 token）。落地形态：
+
+**控制面（`web.py`）**
+- 新表 `pods`（`id, provider, state ∈ busy|idle|deleted, current_task_id, created_at, idle_since,
+  jobs_completed, metadata`）。**一条链路同时只有一个 live Pod（busy 或 idle）。**
+- `_acquire_pending_pods`：链路有 live Pod 时**不向 RunPod 申请**，排队任务标 `awaiting_worker`
+  （带 `position`），同时把 `acquire_started_at` 不断推到当前——容量申请的 15 分钟超时只在真正
+  向 RunPod 要机器时才计时，排在 Pod 后面等 20 分钟不会被误判成"没机器"。
+  建出 Pod 后 `register_pod`，一次 tick 最多建一个 Pod。
+- 结果回调 `pod-result`：`status=succeeded` **且** worker 自报 `worker.pulls_jobs=true` **且**
+  链路 `keep_warm_idle_seconds>0` → `release_pod` 进 idle；否则（失败、老镜像、保温关）照旧立即删 Pod。
+  失败不保温是故意的：坏主机是最常见的失败原因，下一个任务应拿新 Pod。
+- 新接口 `POST /api/internal/pod-jobs/{pod_id}/next`（Bearer 同 `VIDEO_UPLOAD_TOKEN`）：
+  200 带 `{job: {task_id, input, result_url, progress_url}}`；204 没活/在忙/已到寿命上限（排空）；
+  404 Pod 未登记或已回收（worker 停止轮询等删）。`claim_next_task` 用 `BEGIN IMMEDIATE` 原子地
+  「idle→busy + 任务挂到该 Pod」，与守卫线程的删除互斥（`retire_pod(from_states=("idle",))`
+  抢不到就不删）。任务元数据记 `pod_reused=true`、`job_started_at`、`pod_jobs_before`。
+- 守卫 tick 新增 `_tend_pod_lane`：**30 分钟运行上限从 `job_started_at` 起算**（复用 Pod 时是交接时刻，
+  首个任务等于 `pod_created_at`）；idle 超过 `keep_warm_idle_seconds` 或存活超过
+  `max_pod_lifetime_seconds`（默认 4 小时）→ 删；busy 但当前任务已终态（回调两步写之间崩了）→ 删。
+  另有每 60 秒一次的**孤儿清扫**：`GET /pods` 里名字匹配 `^<prefix>-[0-9a-f]{12}$`（生产命名）
+  且不在 `pods` 表里的 Pod 直接删——控制面失忆时的兜底。诊断 Pod 名字是 `papa-h3-<tag>-<n>`，不会被误删。
+  表里没有记录的 Pod（部署前建的）到运行上限仍然删。
+- 队列深度：Pod 链路从「有未完成任务就 429」改成**最多 3 个未完成任务**（`MAX_UNFINISHED_POD_TASKS`），
+  第 4 个 429「队列已满」。只在 `RUNPOD_COST_GUARD_ENABLED=1` 时放开。
+- 配置：`RUNPOD_H3_POD_KEEP_WARM_SECONDS`（默认 0=关，生产设 600）、
+  `RUNPOD_H3_POD_MAX_LIFETIME_SECONDS`（默认 14400）；Wan 同名 `RUNPOD_WAN_POD_*`，**Wan 保持 0**
+  （Wan 镜像的 smoke.py 不会拉活，开了只会白烧空闲窗口）。
+
+**worker（`workers/minimax-h3/smoke.py`）**
+- 首个任务仍从 `SMOKE_INPUT_JSON` 来；回调 payload 多带 `worker: {pulls_jobs: <bool>}`。
+- 成功后进入 `pull_jobs`：每 5 秒 `POST {POD_JOBS_BASE_URL}/{RUNPOD_POD_ID}/next`；拿到活就把
+  `POD_RESULT_CALLBACK_URL`/`POD_PROGRESS_CALLBACK_URL` 换成该任务的再跑 handler（模型已常驻，
+  `_GENERATOR` 缓存、`ensure_models` 有 marker 直接跳过）；404/410 停止轮询等删；任务失败停止轮询等删。
+  **worker 永不自行退出**——容器退出 Pod 仍计费，删除权在控制面。
+- `POD_JOBS_BASE_URL` 由控制面建 Pod 时按链路 `keep_warm>0` 才注入；`RUNPOD_POD_ID` 是 RunPod 注入的标准 env，
+  缺任一则 `pulls_jobs=false`，退回一次性行为。
+
+**前端**：新阶段文案 `awaiting_worker`（「已排队，等待云 GPU 完成当前任务（前面还有 n 个）」）、
+`pod_reused`（「复用已就绪的云 GPU，直接开始推理」）。
+
+**测试**：116 全过（新增 14：回调保温/一次性/失败三分支、拉活接口含 401/404/204/排空、守卫不建第二个 Pod、
+容量超时从真正申请起算、空闲窗口删、寿命上限删、孤儿清扫只删生产命名、复用 Pod 的运行上限从交接起算、
+表里没有的 Pod 到上限仍删、claim 与 retire 单赢家、smoke 拉活循环、smoke 回调自报 pulls_jobs）。
