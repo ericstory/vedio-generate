@@ -75,27 +75,87 @@ python3 /work/restore_pruned_adaln.py \
 echo "STAGE restored $(ls -l /work/out | tail -1) disk_free=$(df -BG /work | awk 'NR==2{print $4}')"
 rm -rf /work/in
 python3 - <<'PY'
-import os, time, traceback
+import io, json, os, time, traceback
 from huggingface_hub import HfApi
+
+
+# A byte range of a file as its own seekable, readable binary file object.
+# huggingface_hub insists on an io.BufferedIOBase with seek()/tell(); it hashes
+# the object once, then re-reads it in multipart slices by absolute seeks.
+# (No docstring: this text lives inside the launcher's own triple-quoted string.)
+class RangeFile(io.BufferedIOBase):
+    def __init__(self, path, start, length):
+        self._handle = open(path, "rb")
+        self._start, self._length, self._pos = start, length, 0
+        self._handle.seek(start)
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self._pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self._length}[whence]
+        self._pos = max(0, min(base + offset, self._length))
+        self._handle.seek(self._start + self._pos)
+        return self._pos
+
+    def read(self, size=-1):
+        remaining = self._length - self._pos
+        if size is None or size < 0 or size > remaining:
+            size = remaining
+        data = self._handle.read(size)
+        self._pos += len(data)
+        return data
+
+    def readinto(self, buffer):
+        data = self.read(len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
+    def close(self):
+        self._handle.close()
+        super().close()
+
+# Xet failed the 66 GB single-file upload eight times in a row with
+# "error decoding response body" (two Pods, two data centres), so this goes
+# over classic LFS, whose per-file ceiling is 50 GB: the file travels as two
+# byte-range halves (no extra disk, RangeFile streams each range) and the
+# worker appends the second onto the first after downloading.
+os.environ["HF_HUB_DISABLE_XET"] = "1"
 api = HfApi()
 local = "/work/out/" + os.path.basename(os.environ["TARGET_FILE"])
+target = os.environ["TARGET_FILE"]
+size = os.path.getsize(local)
+count = int(os.environ.get("UPLOAD_PARTS", "2"))
+edges = [round(size * i / count) for i in range(count + 1)]
 message = "Restore 10Eros Max beta4 full AdaLN + per-head QKV for SGLang (papa " + os.environ["PAPA_GIT_SHA"][:7] + ")"
-# The first run's single attempt died at 66 GB with a transient xet
-# "error decoding response body". Xet deduplicates on the server, so a retry
-# only re-sends the chunks that did not land; the high-performance mode is
-# dropped after the first failure in case its concurrency is what tripped.
-for attempt in range(1, 9):
-    try:
-        info = api.upload_file(path_or_fileobj=local, path_in_repo=os.environ["TARGET_FILE"], repo_id=os.environ["TARGET_REPO"], commit_message=message)
-        print("STAGE uploaded", info.commit_url, flush=True)
-        break
-    except Exception:
-        print(f"STAGE upload_retry attempt={attempt}", flush=True)
-        traceback.print_exc()
-        os.environ.pop("HF_XET_HIGH_PERFORMANCE", None)
-        time.sleep(min(60 * attempt, 300))
-else:
-    raise SystemExit("upload failed after 8 attempts")
+parts = []
+for index in range(count):
+    start, end = edges[index], edges[index + 1]
+    name = f"{target}.part{index + 1}of{count}"
+    for attempt in range(1, 7):
+        try:
+            with RangeFile(local, start, end - start) as chunk:
+                info = api.upload_file(path_or_fileobj=chunk, path_in_repo=name, repo_id=os.environ["TARGET_REPO"],
+                                       commit_message=f"{message} [part {index + 1}/{count}]")
+            print("STAGE uploaded", name, end - start, info.commit_url, flush=True)
+            parts.append({"path": name, "offset": start, "size": end - start})
+            break
+        except Exception:
+            print(f"STAGE upload_retry part={index + 1} attempt={attempt}", flush=True)
+            traceback.print_exc()
+            time.sleep(min(60 * attempt, 300))
+    else:
+        raise SystemExit(f"part {index + 1} failed after 6 attempts")
+manifest = {"file": target, "size": size, "parts": parts, "restored_by": "papa " + os.environ["PAPA_GIT_SHA"]}
+api.upload_file(path_or_fileobj=json.dumps(manifest, indent=2).encode(), path_in_repo=target + ".parts.json",
+                repo_id=os.environ["TARGET_REPO"], commit_message=message + " [manifest]")
+print("STAGE manifest", json.dumps(manifest), flush=True)
 print("STAGE revision", api.model_info(os.environ["TARGET_REPO"]).sha, flush=True)
 PY
 echo "STAGE done $(date -u +%FT%TZ)"

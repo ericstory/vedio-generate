@@ -4,7 +4,8 @@
   "recommended_network_volume_gb": 170,
   "notes": [
     "Default layout drops the 66.28 GB of stock FL2VA transformer shards because PinkCherry replaces the DiT wholesale. Set INCLUDE_STOCK_TRANSFORMER=1 for the stock-vs-PinkCherry A/B; that needs about 211.72 GB and a 220 GB volume.",
-    "MiniMax H3 emits H.264 video plus 32 kHz stereo AAC in one pass, so this lane has no separate audio model and no mux step."
+    "MiniMax H3 emits H.264 video plus 32 kHz stereo AAC in one pass, so this lane has no separate audio model and no mux step.",
+    "The 10Eros Max lane swaps the PinkCherry DiT for the restored 10Eros Max beta4 (66.3 GB, same footprint) and skips the turbo LoRA; the 220 GB container disk covers either."
   ],
   "artifacts": [
     {
@@ -48,6 +49,15 @@
       "sha256": "b5e25a59292d51bca3fc02b9a0b2284e11b4eb20921a9c5adc2db785956b8966",
       "optional": true,
       "note": "Aggressive 4-step profile. Only downloaded with INCLUDE_FAST_TURBO_LORA=1."
+    },
+    {
+      "repo": "Andrew3453/10Eros-Max-h3-restored",
+      "revision": "a1e652bae8a8064e825741c30123feec39075640",
+      "path": "beta4/10Eros_Max_h3_TURBO-hybrid_beta4_sglang_bf16.safetensors.part{1,2}of2",
+      "size": 66277713248,
+      "sha256": null,
+      "optional": true,
+      "note": "Two LFS halves of 33,138,856,624 bytes each (sum 66,277,713,248). 10Eros Max lane only (H3_NSFW_MODEL_ID=Andrew3453/10Eros-Max-h3-restored). TenStrip/10Eros-Max beta4 (TURBO-hybrid merge, curve-form pruned AdaLN) restored offline by restore_pruned_adaln.py: full_W = pruned_W @ adaln_basis, full_bias = pruned_bias - full_W @ adaln_mean for all 51 adaln_proj groups, time_embedder.* from the stock FL2VA shard 1, QKV rows already regrouped per head. Stored as two byte-range halves (classic LFS caps a file at 50 GB; xet failed the single 66 GB upload repeatedly) that download_models.py appends back into one file. 535 tensors with the stock names and shapes; loads through transformer_weights_path like PinkCherry. Distillation is in the weights: the lane runs with H3_TURBO_LORA_ENABLED=0 and 8 steps, so the turbo LoRA is not downloaded for it."
     }
   ]
 }

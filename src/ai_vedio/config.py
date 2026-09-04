@@ -378,6 +378,83 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
     )
 
 
+# Revision of Andrew3453/10Eros-Max-h3-restored that carries the restored
+# beta4 transformer (see workers/minimax-h3/restore_pruned_adaln.py).
+EROS_RESTORED_MODEL_ID = "Andrew3453/10Eros-Max-h3-restored"
+EROS_RESTORED_REVISION = "a1e652bae8a8064e825741c30123feec39075640"
+
+
+def load_eros_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
+    """Load the 10Eros Max lane: the H3 Pod shape with a different NSFW transformer.
+
+    Same image, same GPU, same volume-free download at start; only the
+    checkpoint pin, the step count and the turbo switch differ, and those live
+    in the Pod template's environment. It is a separate lane (its own template,
+    its own live Pod) so the keep-warm worker never has to reload 66 GB of
+    transformer weights to serve the other checkpoint.
+    """
+    _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    use_management_api_v1 = os.getenv("RUNPOD_API_V1", "0") == "1"
+    return RunPodPodSettings(
+        api_key=_required("RUNPOD_API_KEY"),
+        template_id=_required("RUNPOD_EROS_POD_TEMPLATE_ID"),
+        network_volume_id=os.getenv("RUNPOD_EROS_POD_NETWORK_VOLUME_ID", "").strip(),
+        callback_url=_required("RUNPOD_EROS_POD_CALLBACK_URL"),
+        callback_token=_required("VIDEO_UPLOAD_TOKEN"),
+        api_base_url=os.getenv(
+            "RUNPOD_MANAGEMENT_API_BASE_URL",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",  # rp-migrate: keep-v1
+        ).rstrip("/"),
+        use_management_api_v1=use_management_api_v1,
+        gpu_id=os.getenv(
+            "RUNPOD_EROS_POD_GPU_ID",
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        ),
+        additional_gpu_ids=_parse_gpu_ids("RUNPOD_EROS_POD_ADDITIONAL_GPU_IDS"),
+        data_center_id=os.getenv("RUNPOD_EROS_POD_DATA_CENTER_ID", "US-NC-2"),
+        fallback_data_center_id=os.getenv("RUNPOD_EROS_POD_FALLBACK_DATA_CENTER_ID", ""),
+        fallback_network_volume_id=os.getenv(
+            "RUNPOD_EROS_POD_FALLBACK_NETWORK_VOLUME_ID", ""
+        ),
+        additional_region_volumes=_parse_region_volumes(
+            "RUNPOD_EROS_POD_ADDITIONAL_REGION_VOLUMES"
+        ),
+        preferred_data_center_ids=_parse_id_list("RUNPOD_EROS_POD_PREFERRED_DATA_CENTER_IDS"),
+        maximum_price_per_hour=float(
+            os.getenv("RUNPOD_EROS_POD_MAX_PRICE_PER_HOUR", "3.0")
+        ),
+        maximum_runtime_seconds=int(
+            os.getenv("RUNPOD_EROS_POD_MAX_RUNTIME_SECONDS", "1800")
+        ),
+        acquire_timeout_seconds=float(
+            os.getenv("RUNPOD_EROS_POD_ACQUIRE_TIMEOUT_SECONDS", "900")
+        ),
+        acquire_retry_seconds=float(
+            os.getenv("RUNPOD_EROS_POD_ACQUIRE_RETRY_SECONDS", "20")
+        ),
+        keep_warm_idle_seconds=float(os.getenv("RUNPOD_EROS_POD_KEEP_WARM_SECONDS", "0")),
+        max_pod_lifetime_seconds=float(
+            os.getenv("RUNPOD_EROS_POD_MAX_LIFETIME_SECONDS", "14400")
+        ),
+        # 78 GB of stock FL2VA (text encoder, VAEs) plus the 66 GB restored DiT.
+        container_disk_gb=int(os.getenv("RUNPOD_EROS_POD_CONTAINER_DISK_GB", "220")),
+        model_id=os.getenv("H3_MODEL_ID", "MiniMaxAI/MiniMax-H3"),
+        model_version=os.getenv(
+            "H3_MODEL_VERSION", "42ed227ee7df40d41602854ae760620d6eb651fe"
+        ),
+        workflow_version=os.getenv(
+            "EROS_WORKFLOW_VERSION", "h3-fl2va-10eros-beta4-v1"
+        ),
+        ui_model_id="minimax-h3-10eros",
+        name_prefix="papa-eros",
+        adult_adapter_id="",
+        adult_adapter_version="",
+        adult_adapter_strength=1.0,
+        adult_model_id=os.getenv("EROS_NSFW_MODEL_ID", EROS_RESTORED_MODEL_ID),
+        adult_model_version=os.getenv("EROS_NSFW_MODEL_VERSION", EROS_RESTORED_REVISION),
+    )
+
+
 def load_ltx_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
     """Load the LTX 2.3 fallback lane on the same on-demand Pod shape as H3.
 

@@ -22,6 +22,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 
 from .capabilities import (
+    EROS_MODEL,
+    EROS_POD_PROVIDER,
+    H3_FAMILY,
     LTX_MODEL,
     LTX_POD_PROVIDER,
     POD_PROVIDERS,
@@ -34,6 +37,7 @@ from .config import (
     RunPodPodSettings,
     load_runpod_settings,
     load_settings,
+    load_eros_pod_settings,
     load_h3_pod_settings,
     load_ltx_pod_settings,
     load_wan_pod_settings,
@@ -87,6 +91,8 @@ class WebSettings:
     # Route new LTX tasks to the on-demand Pod lane instead of the serverless
     # endpoint. Off keeps the legacy serverless path for a clean rollback.
     ltx_pod_enabled: bool = False
+    # The 10Eros Max lane on the H3 worker image; gated like H3 itself.
+    eros_enabled: bool = False
 
 
 def load_web_settings() -> WebSettings:
@@ -126,6 +132,7 @@ def load_web_settings() -> WebSettings:
         wan_v2_enabled=os.getenv("WAN_V2_ENABLED", "0") == "1",
         h3_enabled=os.getenv("H3_ENABLED", "0") == "1",
         ltx_pod_enabled=os.getenv("LTX_POD_ENABLED", "0") == "1",
+        eros_enabled=os.getenv("EROS_ENABLED", "0") == "1",
     )
 
 
@@ -640,22 +647,33 @@ def _ltx_pod_client() -> Iterator[RunPodPodClient]:
         client.close()
 
 
+def _eros_pod_client() -> Iterator[RunPodPodClient]:
+    client = RunPodPodClient(load_eros_pod_settings())
+    try:
+        yield client
+    finally:
+        client.close()
+
+
 # Wrapped rather than bound directly so the lookup resolves the module
 # attribute at call time, which keeps the factories patchable in tests.
 POD_CLIENT_FACTORIES = {
     "runpod_wan_pod": lambda: _wan_pod_client(),
     "runpod_h3_pod": lambda: _h3_pod_client(),
     LTX_POD_PROVIDER: lambda: _ltx_pod_client(),
+    EROS_POD_PROVIDER: lambda: _eros_pod_client(),
 }
 POD_TEMPLATE_ENV_VARS = {
     "runpod_wan_pod": "RUNPOD_WAN_POD_TEMPLATE_ID",
     "runpod_h3_pod": "RUNPOD_H3_POD_TEMPLATE_ID",
     LTX_POD_PROVIDER: "RUNPOD_LTX_POD_TEMPLATE_ID",
+    EROS_POD_PROVIDER: "RUNPOD_EROS_POD_TEMPLATE_ID",
 }
 POD_TIMEOUT_LABELS = {
     "runpod_wan_pod": "Wan",
     "runpod_h3_pod": "MiniMax H3",
     LTX_POD_PROVIDER: "LTX",
+    EROS_POD_PROVIDER: "10Eros",
 }
 
 
@@ -1094,6 +1112,9 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         markup = markup.replace(
             "__H3_OPTION_STATE__", "" if settings.h3_enabled else "disabled"
         )
+        markup = markup.replace(
+            "__EROS_OPTION_STATE__", "" if settings.eros_enabled else "disabled"
+        )
         return HTMLResponse(markup)
 
     @app.get(f"{settings.base_path}/healthz")
@@ -1439,15 +1460,18 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                     detail="自建 GPU 当前已有任务，请等待完成后再提交",
                 )
         if is_self_hosted and resolution == "1080p":
-            supported = "480p、720p 或 768p" if model == H3_MODEL else "480p 或 720p"
+            supported = "480p、720p 或 768p" if model in H3_FAMILY else "480p 或 720p"
             raise HTTPException(status_code=422, detail=f"自建模型首版仅支持 {supported}")
-        if resolution == "768p" and model != H3_MODEL:
+        if resolution == "768p" and model not in H3_FAMILY:
             raise HTTPException(
                 status_code=422, detail="768p 只有 MiniMax H3 支持"
             )
-        if model == H3_MODEL:
-            if not settings.h3_enabled:
+        if model in H3_FAMILY:
+            # Each H3 checkpoint is its own lane with its own switch.
+            if model == H3_MODEL and not settings.h3_enabled:
                 raise HTTPException(status_code=503, detail="MiniMax H3 主线尚未启用")
+            if model == EROS_MODEL and not settings.eros_enabled:
+                raise HTTPException(status_code=503, detail="10Eros Max 链路尚未启用")
             if reference and reference.filename:
                 raise HTTPException(
                     status_code=422, detail="H3 文生视频首版暂不接收参考图"

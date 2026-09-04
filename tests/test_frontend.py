@@ -75,3 +75,16 @@ def test_frontend_treats_h3_as_self_hosted_and_names_its_queue_stages() -> None:
     # 768p is H3's short edge: enabled only there, and the H3 default.
     assert "option.textContent==='768p')option.disabled=!h3" in script
     assert "if(h3 && resolution.value!=='768p') resolution.value='768p'" in script
+
+
+def test_frontend_offers_10eros_as_a_second_h3_lane() -> None:
+    root = Path(__file__).parents[1] / "src" / "ai_vedio" / "web_assets"
+    script = (root / "static" / "app.js").read_text(encoding="utf-8")
+    markup = (root / "index.html").read_text(encoding="utf-8")
+    assert 'value="minimax-h3-10eros" __EROS_OPTION_STATE__' in markup
+    assert "'minimax-h3-10eros': '自建 · MiniMax H3 + 10Eros Max'" in script
+    assert "new Set(['minimax-h3-pinkcherry', 'minimax-h3-10eros'" in script
+    # Both checkpoints run the H3 worker: the 768p default and the reference-image rule follow the family.
+    assert "const H3_MODELS = new Set([H3_MODEL, EROS_MODEL])" in script
+    assert "const h3=H3_MODELS.has(model)" in script
+    assert "10Eros Max（TURBO 蒸馏已烤进权重，不加 LoRA）" in script

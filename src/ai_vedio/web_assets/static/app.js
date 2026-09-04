@@ -7,6 +7,7 @@ const statusMap = {
 };
 const modelNames = {
   'minimax-h3-pinkcherry': '自建主线 · MiniMax H3 + PinkCherry',
+  'minimax-h3-10eros': '自建 · MiniMax H3 + 10Eros Max',
   'wan-2.2-a14b-adult-v2': '自建 V2 · Wan 2.2 成人 LoRA',
   'pinkcherry-ltx-2.3-v1.8': '自建 · PinkCherry LTX 2.3',
   'seedance-2.5': 'Seedance 2.5',
@@ -14,8 +15,11 @@ const modelNames = {
   'seedance-2-fast': 'Seedance 2.0 Fast',
   'seedance-2.0': 'Seedance 2.0'
 };
-const selfHostedModels = new Set(['minimax-h3-pinkcherry', 'pinkcherry-ltx-2.3-v1.8', 'wan-2.2-a14b-adult-v2']);
+const selfHostedModels = new Set(['minimax-h3-pinkcherry', 'minimax-h3-10eros', 'pinkcherry-ltx-2.3-v1.8', 'wan-2.2-a14b-adult-v2']);
 const H3_MODEL = 'minimax-h3-pinkcherry';
+const EROS_MODEL = 'minimax-h3-10eros';
+// Both run the MiniMax H3 worker: same 768p short edge, same no-reference rule.
+const H3_MODELS = new Set([H3_MODEL, EROS_MODEL]);
 const progressStageNames = {
   awaiting_gpu: '正在申请云 GPU 机器', pod_created: '云 GPU 已分配，正在启动',
   awaiting_worker: '已排队，等待云 GPU 完成当前任务', pod_reused: '复用已就绪的云 GPU，直接开始推理',
@@ -119,7 +123,7 @@ function resetComposer() { state.selected=null; renderTasks(); $('#detail-view')
 function openSidebar(){ $('#sidebar').classList.add('open'); $('#sidebar-scrim').classList.add('open'); }
 function closeSidebar(){ $('#sidebar').classList.remove('open'); $('#sidebar-scrim').classList.remove('open'); }
 function syncModelCapabilities() {
-  const model=$('#model').value; const selfHosted=selfHostedModels.has(model); const wan=model==='wan-2.2-a14b-adult-v2'; const h3=model===H3_MODEL;
+  const model=$('#model').value; const selfHosted=selfHostedModels.has(model); const wan=model==='wan-2.2-a14b-adult-v2'; const h3=H3_MODELS.has(model); const eros=model===EROS_MODEL;
   const referenceControl=$('#reference-control'); const audio=$('#generate-audio');
   referenceControl.classList.toggle('disabled', selfHosted);
   $('#reference').disabled=selfHosted;
@@ -141,7 +145,9 @@ function syncModelCapabilities() {
   if(selfHosted && resolution.value==='1080p') resolution.value='720p';
   Array.from($('#ratio').options).forEach(option=>option.disabled=false);
   Array.from($('#duration').options).forEach(option=>option.disabled=false);
-  $('#model-hint').innerHTML=h3
+  $('#model-hint').innerHTML=eros
+    ? '<b>自建 · 云 GPU 按需 Pod</b> · MiniMax H3 + 10Eros Max（TURBO 蒸馏已烤进权重，不加 LoRA）· 768p · 4–15 秒 · 原生同步音频 · 提交后自动排队申请 GPU，约 5–8 分钟出片'
+    : h3
     ? '<b>自建主线 · 云 GPU 按需 Pod</b> · MiniMax H3 + PinkCherry · 768p · 4–15 秒 · 原生同步音频 · 提交后自动排队申请 GPU，约 5–8 分钟出片'
     : wan
     ? '<b>独立云 GPU 质量链路</b> · Wan 2.2 A14B · 成人双 LoRA · 4–15 秒 · 全画幅 · AI 生成音效'

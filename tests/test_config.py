@@ -46,3 +46,32 @@ def test_ltx_pod_lane_reads_its_own_prefix_and_shares_the_serverless_pins(monkey
     # PinkCherry LTX is the whole checkpoint: no adapter pin, no swapped transformer.
     assert settings.adult_adapter_id == "" and settings.adult_model_id == ""
 
+
+
+def test_eros_pod_lane_is_the_h3_shape_with_its_own_prefix_and_checkpoint(monkeypatch) -> None:
+    from ai_vedio.config import EROS_RESTORED_MODEL_ID, EROS_RESTORED_REVISION, load_eros_pod_settings
+
+    monkeypatch.setenv("RUNPOD_API_KEY", "k")
+    monkeypatch.setenv("RUNPOD_EROS_POD_TEMPLATE_ID", "tpl-eros")
+    monkeypatch.setenv("RUNPOD_EROS_POD_CALLBACK_URL", "https://host.example/generate/api/internal/pod-result")
+    monkeypatch.setenv("VIDEO_UPLOAD_TOKEN", "tok")
+    monkeypatch.setenv("RUNPOD_EROS_POD_KEEP_WARM_SECONDS", "600")
+    monkeypatch.setenv("RUNPOD_EROS_POD_PREFERRED_DATA_CENTER_IDS", "US-NC-1,US-NC-2")
+    monkeypatch.delenv("RUNPOD_EROS_POD_NETWORK_VOLUME_ID", raising=False)
+    monkeypatch.delenv("EROS_NSFW_MODEL_ID", raising=False)
+    monkeypatch.delenv("EROS_NSFW_MODEL_VERSION", raising=False)
+    settings = load_eros_pod_settings()
+    assert settings.template_id == "tpl-eros"
+    assert settings.network_volume_id == ""
+    assert settings.container_disk_gb == 220
+    assert settings.keep_warm_idle_seconds == 600
+    assert settings.preferred_data_center_ids == ("US-NC-1", "US-NC-2")
+    assert settings.ui_model_id == "minimax-h3-10eros"
+    assert settings.name_prefix == "papa-eros"
+    # Same base model as the PinkCherry lane; the swapped transformer is what differs.
+    assert settings.model_id == "MiniMaxAI/MiniMax-H3"
+    assert settings.workflow_version == "h3-fl2va-10eros-beta4-v1"
+    assert settings.adult_adapter_id == ""
+    assert settings.adult_model_id == EROS_RESTORED_MODEL_ID == "Andrew3453/10Eros-Max-h3-restored"
+    assert settings.adult_model_version == EROS_RESTORED_REVISION
+    assert len(EROS_RESTORED_REVISION) == 40, "pin the restored checkpoint's Hub revision"

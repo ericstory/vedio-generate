@@ -798,3 +798,67 @@ def test_range_reader_retries_and_rejects_short_reads(monkeypatch) -> None:
     with pytest.raises(IOError, match="short range response"):
         reader.read(4)
     assert calls["n"] == 3 and reader.tell() == 10
+
+
+def test_h3_download_picks_the_nsfw_checkpoint_by_model_id_and_regroups_only_pinkcherry() -> None:
+    """One image serves both H3 lanes; the template's H3_NSFW_MODEL_ID selects the transformer."""
+    download = (WORKER_ROOT / "download_models.py").read_text(encoding="utf-8")
+    assert 'NSFW_REPO = os.getenv("H3_NSFW_MODEL_ID", DEFAULT_NSFW_REPO)' in download
+    assert 'NSFW_REVISION = os.getenv("H3_NSFW_MODEL_VERSION") or NSFW_PROFILE["revision"]' in download
+    assert 'if NSFW_PROFILE["regroup"]:' in download and "regroup_qkv_in_place(nsfw_path)" in download
+    # The turbo LoRA is only fetched for a lane that applies it.
+    assert 'if os.getenv("H3_TURBO_LORA_ENABLED", "1") == "1":' in download
+    namespace: dict = {}
+    profiles_src = download[download.index("NSFW_PROFILES = {") : download.index("NSFW_REPO = os.getenv")]
+    exec(profiles_src, namespace)
+    profiles = namespace["NSFW_PROFILES"]
+    assert profiles["SexGod1979/PinkCherry_MiniMax-H3"]["regroup"] is True
+    eros = profiles["Andrew3453/10Eros-Max-h3-restored"]
+    assert eros["regroup"] is False and eros["subdir"] == "10eros"
+    assert eros["file"] == "beta4/10Eros_Max_h3_TURBO-hybrid_beta4_sglang_bf16.safetensors"
+    # Two LFS halves come down and are appended back into the one file the handler loads.
+    assert eros["parts"] == [eros["file"] + ".part1of2", eros["file"] + ".part2of2"]
+    assert "for part in parts[1:]:\n        append_part(nsfw_path, staging / part)" in download
+    assert len(eros["revision"]) == 40, "pin the restored checkpoint's Hub revision"
+    lock = json.loads((WORKER_ROOT / "models.lock.json").read_text(encoding="utf-8"))
+    pinned = {(a["repo"], a["path"]): a for a in lock["artifacts"]}
+    entry = pinned[("Andrew3453/10Eros-Max-h3-restored", eros["file"] + ".part{1,2}of2")]
+    assert entry["revision"] == eros["revision"] and entry.get("optional") is True
+
+
+def test_h3_download_appends_the_second_half_in_place(tmp_path: Path) -> None:
+    import importlib.util as util
+    import sys
+
+    sys.modules.setdefault("huggingface_hub", type(sys)("huggingface_hub"))
+    sys.modules["huggingface_hub"].snapshot_download = lambda **kwargs: None  # type: ignore[attr-defined]
+    if str(WORKER_ROOT) not in sys.path:
+        sys.path.insert(0, str(WORKER_ROOT))
+    spec = util.spec_from_file_location("h3_download_models", WORKER_ROOT / "download_models.py")
+    assert spec and spec.loader
+    module = util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    first, second = tmp_path / "x.safetensors", tmp_path / "x.safetensors.part2of2"
+    first.write_bytes(b"abc")
+    second.write_bytes(b"defgh")
+    assert module.append_part(first, second, chunk_bytes=2) == 5
+    assert first.read_bytes() == b"abcdefgh" and not second.exists()
+
+
+def test_eros_template_points_the_handler_at_the_downloader_layout() -> None:
+    """The template's transformer path must be where download_models.py puts the file."""
+    template = (WORKER_ROOT.parents[1] / "scripts" / "runpod" / "eros_make_template.py").read_text(encoding="utf-8")
+    download = (WORKER_ROOT / "download_models.py").read_text(encoding="utf-8")
+    assert 'f"{ROOT}/10eros/10Eros_Max_h3_TURBO-hybrid_beta4_sglang_bf16.safetensors"' in template
+    assert '"subdir": "10eros"' in download
+    assert '"H3_NSFW_MODEL_ID": "Andrew3453/10Eros-Max-h3-restored"' in template
+    assert '"H3_TURBO_LORA_ENABLED": "0"' in template
+    assert '"H3_INFERENCE_STEPS": "8"' in template
+    assert '"H3_FLOW_SHIFT": "12.0"' in template and '"H3_AUDIO_FLOW_SHIFT": "3.0"' in template
+    assert '"H3_WORKFLOW_VERSION": "h3-fl2va-10eros-beta4-v1"' in template
+    assert "H3_TURBO_LORA_ALPHA" not in template
+    assert 'papa-eros-volumefree-' in template
+    import re
+
+    version = re.search(r'"H3_NSFW_MODEL_VERSION": "([^"]+)"', template).group(1)
+    assert len(version) == 40, "pin the restored checkpoint's Hub revision"

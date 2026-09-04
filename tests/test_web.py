@@ -1442,3 +1442,65 @@ def test_runtime_cap_still_deletes_a_pod_the_table_never_saw(tmp_path: Path, mon
     _runpod_cost_guard_tick(store, shutdown_if_idle=False)
     assert deleted == ["pod-untracked"]
     assert store.get("legacy")["status"] == "failed"
+
+
+def test_eros_lane_is_its_own_flag_gated_h3_family_member(tmp_path: Path, monkeypatch) -> None:
+    """10Eros rides the H3 rules (768p, no reference image) behind its own switch and provider."""
+    from ai_vedio.capabilities import EROS_POD_PROVIDER, H3_FAMILY, POD_PROVIDERS, SELF_HOSTED_PROVIDERS
+
+    assert "minimax-h3-10eros" in H3_FAMILY and SELF_HOSTED_PROVIDERS["minimax-h3-10eros"] == EROS_POD_PROVIDER
+    assert EROS_POD_PROVIDER in POD_PROVIDERS
+    assert EROS_POD_PROVIDER in web.POD_CLIENT_FACTORIES and EROS_POD_PROVIDER in web.POD_TEMPLATE_ENV_VARS
+    assert web.POD_TEMPLATE_ENV_VARS[EROS_POD_PROVIDER] == "RUNPOD_EROS_POD_TEMPLATE_ID"
+    assert web.POD_TIMEOUT_LABELS[EROS_POD_PROVIDER]
+    monkeypatch.setattr(web, "_runpod_cost_guard_tick", lambda store, shutdown_if_idle: False)
+    form = {"prompt": "cinematic wide shot of a sunrise", "model": "minimax-h3-10eros", "ratio": "16:9", "resolution": "768p", "duration": 5}
+
+    off = replace(web_settings(tmp_path), h3_enabled=True)
+    assert off.eros_enabled is False
+    with TestClient(create_app(off)) as client:
+        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
+        assert client.post("/generate/api/tasks", data=form).status_code == 503
+        page = client.get("/generate")
+        assert 'value="minimax-h3-10eros" disabled' in page.text
+        assert 'value="minimax-h3-pinkcherry" disabled' not in page.text
+
+    def provider_must_not_be_called(provider: str):
+        raise AssertionError(f"provider {provider} should not be called during the request")
+
+    monkeypatch.setattr(web, "_provider_client", provider_must_not_be_called)
+    on = replace(
+        web_settings(tmp_path), eros_enabled=True, h3_enabled=False, runpod_cost_guard_enabled=True,
+        runpod_cost_guard_poll_seconds=3600, database_path=tmp_path / "eros.db",
+    )
+    with TestClient(create_app(on)) as client:
+        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
+        assert client.get("/generate").text.count('value="minimax-h3-10eros" disabled') == 0
+        response = client.post("/generate/api/tasks", data=form)
+        assert response.status_code == 201, response.text
+        task = response.json()["task"]
+        assert task["provider"] == EROS_POD_PROVIDER
+        assert task["provider_task_id"] == ""
+        assert task["provider_metadata"]["progress"]["stage"] == "awaiting_gpu"
+        # The PinkCherry lane stays behind its own flag.
+        assert client.post("/generate/api/tasks", data={**form, "model": "minimax-h3-pinkcherry"}).status_code == 503
+        # 1080p is refused with the H3 wording, and a reference image is refused like H3.
+        assert "768p" in client.post("/generate/api/tasks", data={**form, "resolution": "1080p"}).json()["detail"]
+        with_reference = client.post(
+            "/generate/api/tasks", data=form, files={"reference": ("ref.png", b"\x89PNG\r\n\x1a\n" + bytes(16), "image/png")}
+        )
+        assert with_reference.status_code == 422
+
+
+def test_eros_pod_lane_job_carries_the_restored_checkpoint_pin() -> None:
+    """The worker rejects a job whose adult pin disagrees with the weights it loaded, so the pin must travel."""
+    from ai_vedio.runpod import RunPodPodClient
+
+    settings = _pod_settings(
+        ui_model_id="minimax-h3-10eros", name_prefix="papa-eros",
+        adult_adapter_id="", adult_model_id="Andrew3453/10Eros-Max-h3-restored", adult_model_version="abc123",
+        workflow_version="h3-fl2va-10eros-beta4-v1",
+    )
+    job = RunPodPodClient(settings).job_input(prompt="sunrise", resolution="768p", duration=5)
+    assert job["adult_model_id"] == "Andrew3453/10Eros-Max-h3-restored" and job["adult_model_version"] == "abc123"
+    assert "adult_adapter_id" not in job and job["workflow_version"] == "h3-fl2va-10eros-beta4-v1"
