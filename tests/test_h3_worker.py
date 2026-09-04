@@ -540,3 +540,160 @@ def test_h3_smoke_result_declares_whether_the_worker_pulls_jobs(monkeypatch) -> 
     assert sent[-1]["status"] == "succeeded"
     assert sent[-1]["worker"] == {"pulls_jobs": True}
     assert sent[-1]["content"]["job"] == "job-1"
+
+
+def _load_restore():
+    import sys
+
+    if str(WORKER_ROOT) not in sys.path:
+        sys.path.insert(0, str(WORKER_ROOT))
+    spec = importlib.util.spec_from_file_location("h3_restore_pruned_adaln", WORKER_ROOT / "restore_pruned_adaln.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _typed_safetensors(path: Path, tensors: dict[str, tuple[str, list[int], bytes]], metadata: dict | None = None) -> None:
+    import struct
+
+    header: dict = {"__metadata__": metadata} if metadata else {}
+    blob = b""
+    for name, (dtype, shape, data) in tensors.items():
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [len(blob), len(blob) + len(data)]}
+        blob += data
+    encoded = json.dumps(header).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + blob)
+
+
+def test_curve_form_adaln_is_restored_to_the_full_projection(tmp_path: Path) -> None:
+    """full_W = pruned_W @ basis, full_b = pruned_b - full_W @ mean; time embedder from the donor; QKV per head."""
+    np = pytest.importorskip("numpy")
+    restore = _load_restore()
+    rng = np.random.default_rng(7)
+    k, full_dim, out = 2, 3, 4
+    # An orthonormal basis (two axes of the 3-dim space) and a mean off the origin.
+    basis = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    mean = np.array([0.5, -0.25, 2.0], dtype=np.float32)
+    pruned_w = rng.standard_normal((out, k)).astype(np.float32)
+    pruned_b = rng.standard_normal(out).astype(np.float32)
+    final_w = rng.standard_normal((2, k)).astype(np.float32)
+    final_b = rng.standard_normal(2).astype(np.float32)
+    # A tiny time embedder: 2 sinusoid features -> 2 hidden -> 3 out.
+    te = {
+        "time_embedder.proj_in.weight": rng.standard_normal((2, 2)).astype(np.float32),
+        "time_embedder.proj_in.bias": rng.standard_normal(2).astype(np.float32),
+        "time_embedder.proj_out.weight": rng.standard_normal((3, 2)).astype(np.float32),
+        "time_embedder.proj_out.bias": rng.standard_normal(3).astype(np.float32),
+    }
+    grid = 5
+    curve = restore.time_embedding_curve(np.arange(grid) / (grid - 1), {key: value.astype(np.float64) for key, value in te.items()})
+    table = ((curve - mean) @ basis.T).astype(np.float32)  # what ComfyUI would lerp
+    heads, head_dim, cols = 2, 1, 2
+    row = lambda i: bytes([i, 0, i, 0])
+    standard_qkv = b"".join(row(i) for i in range(3 * heads * head_dim))  # q0 q1 k0 k1 v0 v1
+    other = bytes(range(8))
+    f32 = lambda values: np.ascontiguousarray(values, dtype=np.float32).tobytes()
+    pruned_path = tmp_path / "pruned.safetensors"
+    _typed_safetensors(
+        pruned_path,
+        {
+            "adaln_basis": ("F32", [k, full_dim], f32(basis)),
+            "adaln_mean": ("F32", [full_dim], f32(mean)),
+            "adaln_t_table": ("F32", [grid, k], f32(table)),
+            "blocks.0.adaln_proj.linear.weight": ("F32", [out, k], f32(pruned_w)),
+            "blocks.0.adaln_proj.linear.bias": ("F32", [out], f32(pruned_b)),
+            "final_layer.adaln_proj.linear.weight": ("F32", [2, k], f32(final_w)),
+            "final_layer.adaln_proj.linear.bias": ("F32", [2], f32(final_b)),
+            "blocks.0.attn.qkv_proj.weight": ("BF16", [6, cols], standard_qkv),
+            "blocks.0.mlp.fc1.weight": ("BF16", [2, cols], other),
+        },
+        metadata={"description": "H3 LoRA merge"},
+    )
+    donor_path = tmp_path / "donor.safetensors"
+    _typed_safetensors(
+        donor_path,
+        {key: ("F32", list(value.shape), f32(value)) for key, value in te.items()}
+        | {"blocks.0.mlp.fc1.weight": ("BF16", [2, cols], bytes(8))},
+    )
+    output = tmp_path / "restored.safetensors"
+    summary = restore.restore(pruned_path, donor_path, output, heads=heads, head_dim=head_dim, extra_metadata={"source": "test"})
+    assert summary["restored_weights"] == 2 and summary["restored_biases"] == 2 and summary["regrouped_qkv"] == 1
+    assert summary["tensors"] == 9 - 3 + 4
+
+    with output.open("rb") as handle:
+        header, base = restore.read_header(handle)
+        assert set(restore.CURVE_KEYS).isdisjoint(header)
+        assert header["__metadata__"]["description"] == "H3 LoRA merge"
+        assert header["__metadata__"]["source"] == "test"
+        assert header["__metadata__"]["qkv_row_layout"] == "per_head"
+        assert header["blocks.0.adaln_proj.linear.weight"]["shape"] == [out, full_dim]
+        assert header["final_layer.adaln_proj.linear.weight"]["shape"] == [2, full_dim]
+        full_w = restore.load_tensor(handle, base, header["blocks.0.adaln_proj.linear.weight"])
+        full_b = restore.load_tensor(handle, base, header["blocks.0.adaln_proj.linear.bias"])
+        np.testing.assert_allclose(full_w, pruned_w @ basis, rtol=1e-6)
+        np.testing.assert_allclose(full_b, pruned_b - (pruned_w @ basis) @ mean, rtol=1e-5, atol=1e-6)
+        for key, value in te.items():
+            np.testing.assert_array_equal(restore.load_tensor(handle, base, header[key]), value)
+        a, b = header["blocks.0.attn.qkv_proj.weight"]["data_offsets"]
+        handle.seek(base + a)
+        assert handle.read(b - a) == b"".join(row(i) for i in (0, 2, 4, 1, 3, 5))
+        a, b = header["blocks.0.mlp.fc1.weight"]["data_offsets"]
+        handle.seek(base + a)
+        assert handle.read(b - a) == other
+        # Offsets are contiguous and the data section is exactly as long as the header promises.
+        offsets = sorted(meta["data_offsets"] for key, meta in header.items() if key != "__metadata__")
+        assert offsets[0][0] == 0 and all(prev[1] == nxt[0] for prev, nxt in zip(offsets, offsets[1:]))
+        assert output.stat().st_size == base + offsets[-1][1]
+
+    # The restored projections reproduce the table lookup on the curve grid.
+    results = restore.verify(pruned_path, donor_path, output, sample_keys=("blocks.0", "final_layer"), log=lambda _: None)
+    assert results["blocks.0"] < 1e-5 and results["final_layer"] < 1e-5
+
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"weight_map": {key: "s" for key in header if key != "__metadata__"}}))
+    restore.check_against_index(output, index)
+    index.write_text(json.dumps({"weight_map": {"blocks.0.adaln_proj.linear.weight": "s"}}))
+    with pytest.raises(ValueError, match="key set differs"):
+        restore.check_against_index(output, index)
+
+
+def test_restore_refuses_a_table_built_from_another_time_embedder(tmp_path: Path) -> None:
+    """A curve table that does not come from the donor's embedder must fail verification, not ship."""
+    np = pytest.importorskip("numpy")
+    restore = _load_restore()
+    f32 = lambda values: np.ascontiguousarray(values, dtype=np.float32).tobytes()
+    basis = np.eye(2, 3, dtype=np.float32)
+    te = {
+        "time_embedder.proj_in.weight": np.full((2, 2), 0.3, dtype=np.float32),
+        "time_embedder.proj_in.bias": np.zeros(2, dtype=np.float32),
+        "time_embedder.proj_out.weight": np.full((3, 2), 0.7, dtype=np.float32),
+        "time_embedder.proj_out.bias": np.zeros(3, dtype=np.float32),
+    }
+    pruned_path, donor_path, output = (tmp_path / name for name in ("p.safetensors", "d.safetensors", "o.safetensors"))
+    _typed_safetensors(
+        pruned_path,
+        {
+            "adaln_basis": ("F32", [2, 3], f32(basis)),
+            "adaln_mean": ("F32", [3], f32(np.zeros(3))),
+            "adaln_t_table": ("F32", [4, 2], f32(np.full((4, 2), 5.0))),  # not this embedder's curve
+            "blocks.0.adaln_proj.linear.weight": ("F32", [2, 2], f32(np.eye(2))),
+            "blocks.0.adaln_proj.linear.bias": ("F32", [2], f32(np.zeros(2))),
+        },
+    )
+    _typed_safetensors(donor_path, {key: ("F32", list(value.shape), f32(value)) for key, value in te.items()})
+    restore.restore(pruned_path, donor_path, output, regroup=False)
+    with pytest.raises(ValueError, match="deviates"):
+        restore.verify(pruned_path, donor_path, output, sample_keys=("blocks.0",), log=lambda _: None)
+
+
+def test_bf16_round_trip_uses_round_to_nearest_even() -> None:
+    np = pytest.importorskip("numpy")
+    restore = _load_restore()
+    values = np.array([1.0, 1.00390625, 1.01171875, -2.5, 65504.0, 3.14159], dtype=np.float32)
+    back = restore.bf16_to_f32(restore.f32_to_bf16(values))
+    # Ties go to even: 1 + 2^-8 sits exactly between two bf16 values and rounds down to 1.0;
+    # 1 + 3*2^-8 rounds up to 1 + 2^-6.
+    assert back.tolist()[:3] == [1.0, 1.0, 1.015625]
+    assert back[3] == -2.5
+    assert abs(back[5] - 3.14159) < 2**-7

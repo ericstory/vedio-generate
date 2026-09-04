@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<9"]
+dev = ["pytest>=8,<9", "numpy>=2,<3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_vedio"]
