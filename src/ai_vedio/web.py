@@ -10,12 +10,14 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import sqlite3
+import time
 from typing import Any, Iterator
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -27,6 +29,7 @@ from .capabilities import (
 )
 from .config import (
     PROJECT_ROOT,
+    RunPodPodSettings,
     load_runpod_settings,
     load_settings,
     load_h3_pod_settings,
@@ -50,6 +53,17 @@ ALLOWED_RESOLUTIONS = {"480p", "720p", "768p", "1080p"}
 H3_MODEL = "minimax-h3-pinkcherry"
 ALLOWED_DURATIONS = set(range(4, 16))
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
+# A Pod lane runs one GPU Pod at a time. While that Pod is busy or warm, further
+# submissions queue behind it up to this depth: enough to line up a few prompts
+# for a warm worker, small enough that a forgotten queue cannot keep a Pod
+# billing for hours.
+MAX_UNFINISHED_POD_TASKS = 3
+# Production Pods are named "<lane prefix>-<first 12 hex chars of the task id>".
+# Diagnostic Pods from scripts/runpod are "<prefix>-<tag>-<n>" and never match,
+# so the orphan sweep cannot touch them.
+_PRODUCTION_POD_NAME = re.compile(r"^(?P<prefix>.+)-[0-9a-f]{12}$")
+_ORPHAN_SWEEP_INTERVAL_SECONDS = 60.0
+_last_orphan_sweep: dict[str, float] = {}
 
 
 @dataclass(frozen=True)
@@ -157,6 +171,24 @@ class TaskStore:
                 "WHERE (provider_task_id IS NULL OR provider_task_id='') "
                 f"AND provider NOT IN ({pod_placeholders})",
                 tuple(sorted(POD_PROVIDERS)),
+            )
+            # One row per GPU Pod the control plane has created. A lane owns at
+            # most one live (busy or idle) Pod; a warm idle Pod is reused by
+            # the next queued task instead of paying another cold start.
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pods (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    current_task_id TEXT,
+                    created_at TEXT NOT NULL,
+                    idle_since TEXT,
+                    jobs_completed INTEGER NOT NULL DEFAULT 0,
+                    metadata TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
 
     def connect(self) -> sqlite3.Connection:
@@ -293,6 +325,130 @@ class TaskStore:
                 values,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # -- Pods: one live GPU Pod per lane, reused across jobs while warm --------
+
+    def register_pod(
+        self,
+        provider: str,
+        pod_id: str,
+        *,
+        task_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a freshly created Pod, busy with the task it was created for."""
+        now = _now()
+        with self.connect() as db:
+            db.execute(
+                """INSERT OR REPLACE INTO pods
+                (id, provider, state, current_task_id, created_at, idle_since,
+                 jobs_completed, metadata, updated_at)
+                VALUES (?, ?, 'busy', ?, ?, NULL, 0, ?, ?)""",
+                (
+                    pod_id,
+                    provider,
+                    task_id,
+                    now,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    now,
+                ),
+            )
+
+    def live_pod(self, provider: str) -> dict[str, Any] | None:
+        """The lane's busy or idle Pod, if it has one."""
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM pods WHERE provider=? AND state IN ('busy', 'idle')
+                ORDER BY created_at ASC LIMIT 1""",
+                (provider,),
+            ).fetchone()
+        return _pod_row(row)
+
+    def get_pod(self, pod_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM pods WHERE id=?", (pod_id,)).fetchone()
+        return _pod_row(row)
+
+    def known_pod_ids(self) -> set[str]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM pods WHERE state IN ('busy', 'idle')"
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
+
+    def release_pod(self, pod_id: str, *, task_id: str) -> bool:
+        """Park a busy Pod idle once the task it was running has finished."""
+        now = _now()
+        with self.connect() as db:
+            cursor = db.execute(
+                """UPDATE pods SET state='idle', current_task_id=NULL, idle_since=?,
+                jobs_completed=jobs_completed+1, updated_at=?
+                WHERE id=? AND state='busy' AND current_task_id=?""",
+                (now, now, pod_id, task_id),
+            )
+        return bool(cursor.rowcount)
+
+    def retire_pod(self, pod_id: str, *, from_states: tuple[str, ...] = ("busy", "idle")) -> bool:
+        """Mark a Pod deleted; True only when this call made the transition.
+
+        Dispatch and deletion both go through this row, so whichever commits
+        first wins: an idle-timeout delete asks for ``from_states=("idle",)``
+        and finds nothing to change if a worker just claimed the Pod.
+        """
+        placeholders = ",".join("?" for _ in from_states)
+        with self.connect() as db:
+            cursor = db.execute(
+                f"""UPDATE pods SET state='deleted', current_task_id=NULL, updated_at=?
+                WHERE id=? AND state IN ({placeholders})""",
+                (_now(), pod_id, *from_states),
+            )
+        return bool(cursor.rowcount)
+
+    def claim_next_task(self, pod_id: str) -> dict[str, Any] | None:
+        """Hand the lane's oldest queued task to this idle Pod, atomically."""
+        with self.connect() as db:
+            # A write lock up front makes the read-then-update one unit against
+            # the guard thread, which may be retiring the same Pod right now.
+            db.execute("BEGIN IMMEDIATE")
+            pod = db.execute(
+                "SELECT * FROM pods WHERE id=? AND state='idle'", (pod_id,)
+            ).fetchone()
+            if not pod:
+                return None
+            task = db.execute(
+                """SELECT * FROM tasks
+                WHERE provider=? AND status='queued'
+                  AND (provider_task_id IS NULL OR provider_task_id='')
+                ORDER BY created_at ASC LIMIT 1""",
+                (pod["provider"],),
+            ).fetchone()
+            if not task:
+                return None
+            now = _now()
+            db.execute(
+                """UPDATE pods SET state='busy', current_task_id=?, idle_since=NULL,
+                updated_at=? WHERE id=?""",
+                (task["id"], now, pod_id),
+            )
+            db.execute(
+                "UPDATE tasks SET provider_task_id=?, updated_at=? WHERE id=?",
+                (pod_id, now, task["id"]),
+            )
+        return dict(task)
+
+
+def _pod_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    pod = dict(row)
+    metadata: dict[str, Any] = {}
+    if pod.get("metadata"):
+        with suppress(ValueError, TypeError):
+            decoded = json.loads(pod["metadata"])
+            if isinstance(decoded, dict):
+                metadata = decoded
+    pod["metadata"] = metadata
+    return pod
 
 
 def _now() -> str:
@@ -546,6 +702,23 @@ def _task_metadata(task: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _progress_of(task: dict[str, Any]) -> dict[str, Any]:
+    progress = _task_metadata(task).get("progress")
+    return progress if isinstance(progress, dict) else {}
+
+
+def _lane_settings(provider: str) -> RunPodPodSettings | None:
+    """The Pod lane's settings, or None when the lane is not configured."""
+    factory = POD_CLIENT_FACTORIES.get(provider)
+    if factory is None:
+        return None
+    with suppress(SeedanceError, ValueError):
+        for client in factory():
+            settings = getattr(client, "settings", None)
+            return settings if isinstance(settings, RunPodPodSettings) else None
+    return None
+
+
 def _acquire_pending_pods(
     store: TaskStore, *, provider: str, client: RunPodPodClient, label: str
 ) -> None:
@@ -556,19 +729,48 @@ def _acquire_pending_pods(
     again. A capacity miss creates no Pod and bills nothing, so the guard loop
     can keep asking for as long as the task is willing to wait, while the
     request itself returns the moment the task is queued.
+
+    A lane runs one Pod at a time. While it has one -- busy, or warm and
+    waiting -- nothing is asked of RunPod: the worker on that Pod pulls the
+    next task itself the moment its current one is delivered.
     """
     now = datetime.now(timezone.utc)
-    for task in store.pending_pod_tasks(provider):
+    pending = store.pending_pod_tasks(provider)
+    if not pending:
+        return
+    live = store.live_pod(provider)
+    if live is None:
+        # Tasks that got a Pod before the pods table existed still hold it.
+        live_task_pods = [t for t in store.active_runpod(provider) if t.get("provider_task_id")]
+        live = {"id": live_task_pods[0]["provider_task_id"]} if live_task_pods else None
+    if live is not None:
+        for position, task in enumerate(pending, start=1):
+            progress = _progress_of(task)
+            # The capacity deadline only runs while RunPod is actually being
+            # asked; keep moving its start while the queue waits its turn.
+            store.update_progress(
+                task["id"],
+                {
+                    "stage": "awaiting_worker",
+                    "position": position,
+                    "pod": live["id"],
+                    "attempts": int(progress.get("attempts") or 0),
+                    "acquire_started_at": _now(),
+                    "at": _now(),
+                },
+            )
+        return
+    for task in pending:
         task_id = task["id"]
-        progress = _task_metadata(task).get("progress")
-        progress = progress if isinstance(progress, dict) else {}
+        progress = _progress_of(task)
         attempts = int(progress.get("attempts") or 0)
         if attempts and progress.get("at"):
             with suppress(ValueError, TypeError):
                 since_last = (now - datetime.fromisoformat(str(progress["at"]))).total_seconds()
                 if since_last < client.settings.acquire_retry_seconds:
                     continue
-        waited = (now - datetime.fromisoformat(task["created_at"])).total_seconds()
+        acquire_started_at = str(progress.get("acquire_started_at") or task["created_at"])
+        waited = (now - datetime.fromisoformat(acquire_started_at)).total_seconds()
         if waited > client.settings.acquire_timeout_seconds:
             minutes = max(1, round(client.settings.acquire_timeout_seconds / 60))
             store.update_remote(
@@ -598,20 +800,17 @@ def _acquire_pending_pods(
             )
         except SeedanceError as exc:
             if _is_capacity_error(exc) or _is_transient_provider_error(exc):
+                waiting: dict[str, Any] = {
+                    "stage": "awaiting_gpu",
+                    "attempts": attempts,
+                    "at": _now(),
+                    "reason": "capacity" if _is_capacity_error(exc) else "provider",
+                }
+                if progress.get("acquire_started_at"):
+                    waiting["acquire_started_at"] = progress["acquire_started_at"]
                 store.update_remote(
                     task_id,
-                    {
-                        "status": "queued",
-                        "content": {
-                            "progress": {
-                                "stage": "awaiting_gpu",
-                                "attempts": attempts,
-                                "at": _now(),
-                                "reason": "capacity" if _is_capacity_error(exc) else "provider",
-                            }
-                        },
-                        "error": None,
-                    },
+                    {"status": "queued", "content": {"progress": waiting}, "error": None},
                 )
                 continue
             store.update_remote(
@@ -630,20 +829,151 @@ def _acquire_pending_pods(
             )
             continue
         content = dict(remote.get("content") or {})
+        total_wait = (now - datetime.fromisoformat(task["created_at"])).total_seconds()
         content.update(
             {
                 # The 30 minute runtime cap counts from here, not from the click.
                 "pod_created_at": _now(),
-                "gpu_wait_seconds": round(waited, 1),
+                "job_started_at": _now(),
+                "gpu_wait_seconds": round(total_wait, 1),
                 "gpu_acquire_attempts": attempts,
                 "progress": {"stage": "pod_created", "at": _now()},
             }
         )
         store.attach_provider_task(task_id, pod_id)
+        store.register_pod(
+            provider,
+            pod_id,
+            task_id=task_id,
+            metadata={
+                key: content[key]
+                for key in ("gpu_name", "pod_price_per_hour", "pod_data_center_id")
+                if content.get(key) is not None
+            },
+        )
         store.update_remote(
             task_id,
             {"status": str(remote.get("status") or "queued"), "content": content, "error": None},
         )
+        # One Pod per lane: the rest of the queue waits for this worker.
+        break
+
+
+def _retire_and_delete(
+    store: TaskStore,
+    client: RunPodPodClient,
+    pod_id: str,
+    *,
+    from_states: tuple[str, ...] = ("busy", "idle"),
+    reason: str = "",
+) -> bool:
+    """Retire the Pod record, then delete the billed Pod. False if a claim won.
+
+    A Pod the table never saw (created before the table existed, or by an
+    older control plane) is deleted unconditionally: untracked is the one
+    state that must never survive.
+    """
+    if store.get_pod(pod_id) is not None and not store.retire_pod(pod_id, from_states=from_states):
+        return False
+    print(json.dumps({"event": "pod_deleted", "pod": pod_id, "reason": reason}), flush=True)
+    client.delete_pod(pod_id)
+    return True
+
+
+def _tend_pod_lane(
+    store: TaskStore, *, provider: str, client: RunPodPodClient, label: str
+) -> None:
+    """Runtime cap per job, existence checks, and the idle window of a warm Pod."""
+    settings = client.settings
+    now = datetime.now(timezone.utc)
+    for task in store.active_runpod(provider):
+        pod_id = str(task.get("provider_task_id") or "")
+        if not pod_id:
+            # Still waiting for capacity: nothing is billed yet and the
+            # acquisition pass owns that deadline.
+            continue
+        metadata = _task_metadata(task)
+        # On a reused Pod the job started when it was handed over, not when the
+        # Pod was created; a fresh Pod's first job starts with the Pod.
+        started_at = str(
+            metadata.get("job_started_at") or metadata.get("pod_created_at") or task["created_at"]
+        )
+        age = (now - datetime.fromisoformat(started_at)).total_seconds()
+        if age > settings.maximum_runtime_seconds:
+            _retire_and_delete(store, client, pod_id, reason="runtime_cap")
+            store.update_remote(
+                task["id"],
+                {
+                    "status": "failed",
+                    "content": {},
+                    "error": f"{label} GPU Pod exceeded the 30 minute cost limit",
+                },
+            )
+            continue
+        try:
+            client.get_task(pod_id)
+        except RunPodError as exc:
+            if exc.status_code == 404:
+                store.retire_pod(pod_id)
+                store.update_remote(
+                    task["id"],
+                    {
+                        "status": "expired",
+                        "content": {},
+                        "error": f"{label} GPU Pod disappeared before returning a result",
+                    },
+                )
+    pod = store.live_pod(provider)
+    if pod is None:
+        return
+    if pod["state"] == "busy":
+        current = store.get(str(pod.get("current_task_id") or "")) if pod.get("current_task_id") else None
+        if current is None or current["status"] in TERMINAL_STATUSES:
+            # The terminal callback parks or deletes the Pod itself; this only
+            # catches a crash between its two writes, and errs on the cheap side.
+            _retire_and_delete(store, client, pod["id"], reason="stale_busy")
+        return
+    lived = (now - datetime.fromisoformat(pod["created_at"])).total_seconds()
+    idle_since = datetime.fromisoformat(pod["idle_since"]) if pod.get("idle_since") else now
+    idle_for = (now - idle_since).total_seconds()
+    if settings.keep_warm_idle_seconds <= 0 or idle_for > settings.keep_warm_idle_seconds:
+        _retire_and_delete(store, client, pod["id"], from_states=("idle",), reason="idle_timeout")
+        return
+    if lived > settings.max_pod_lifetime_seconds:
+        _retire_and_delete(store, client, pod["id"], from_states=("idle",), reason="max_lifetime")
+        return
+    try:
+        client.get_task(pod["id"])
+    except RunPodError as exc:
+        if exc.status_code == 404:
+            store.retire_pod(pod["id"], from_states=("idle",))
+
+
+def _sweep_orphan_pods(store: TaskStore, *, provider: str, client: RunPodPodClient) -> None:
+    """Delete production-named Pods of this lane that nothing is tracking.
+
+    A warm Pod the control plane forgot -- a lost database, a crash between
+    creating and recording it -- would otherwise bill until someone noticed.
+    """
+    list_pods = getattr(client, "list_pods", None)
+    if not callable(list_pods):
+        return
+    now = time.monotonic()
+    if now - _last_orphan_sweep.get(provider, 0.0) < _ORPHAN_SWEEP_INTERVAL_SECONDS:
+        return
+    _last_orphan_sweep[provider] = now
+    known = store.known_pod_ids()
+    for pod in list_pods():
+        if pod["id"] in known:
+            continue
+        match = _PRODUCTION_POD_NAME.match(pod["name"])
+        if not match or match.group("prefix") != client.settings.name_prefix:
+            continue
+        print(
+            json.dumps({"event": "orphan_pod_deleted", "pod": pod["id"], "name": pod["name"]}),
+            flush=True,
+        )
+        client.delete_pod(pod["id"])
 
 
 def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool:
@@ -669,38 +999,13 @@ def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool
         with suppress(SeedanceError, ValueError):
             for client in client_factory():
                 _acquire_pending_pods(store, provider=provider, client=client, label=label)
-                for task in store.active_runpod(provider):
-                    pod_id = str(task.get("provider_task_id") or "")
-                    if not pod_id:
-                        # Still waiting for capacity: nothing is billed yet and
-                        # the acquisition pass owns that deadline.
-                        continue
-                    started_at = str(_task_metadata(task).get("pod_created_at") or task["created_at"])
-                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(started_at)).total_seconds()
-                    if age > client.settings.maximum_runtime_seconds:
-                        client.delete_pod(pod_id)
-                        store.update_remote(
-                            task["id"],
-                            {
-                                "status": "failed",
-                                "content": {},
-                                "error": f"{label} GPU Pod exceeded the 30 minute cost limit",
-                            },
-                        )
-                        continue
-                    try:
-                        client.get_task(pod_id)
-                    except RunPodError as exc:
-                        if exc.status_code == 404:
-                            store.update_remote(
-                                task["id"],
-                                {
-                                    "status": "expired",
-                                    "content": {},
-                                    "error": f"{label} GPU Pod disappeared before returning a result",
-                                },
-                            )
-                pod_active = pod_active or bool(store.active_runpod(provider))
+                _tend_pod_lane(store, provider=provider, client=client, label=label)
+                pod_active = (
+                    pod_active
+                    or bool(store.active_runpod(provider))
+                    or store.live_pod(provider) is not None
+                )
+                _sweep_orphan_pods(store, provider=provider, client=client)
     return ltx_active or wan_active or pod_active
 
 
@@ -893,7 +1198,21 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         )
         pod_id = str(task.get("provider_task_id") or "")
         if pod_id:
-            background_tasks.add_task(delete_pod, str(task["provider"]), pod_id)
+            # A worker that will pull its next job keeps the Pod warm after a
+            # success; a one-shot worker, or a failure (a bad host is the usual
+            # cause), still ends with the Pod deleted the moment this commits.
+            worker = body.get("worker") if isinstance(body.get("worker"), dict) else {}
+            lane = _lane_settings(str(task["provider"]))
+            kept_warm = (
+                status == "succeeded"
+                and bool(worker.get("pulls_jobs"))
+                and lane is not None
+                and lane.keep_warm_idle_seconds > 0
+                and store.release_pod(pod_id, task_id=task_id)
+            )
+            if not kept_warm:
+                store.retire_pod(pod_id)
+                background_tasks.add_task(delete_pod, str(task["provider"]), pod_id)
         return {"ok": True}
 
     @app.post(f"{settings.base_path}/api/internal/pod-progress/{{task_id}}")
@@ -918,6 +1237,78 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             progress["seconds"] = round(float(seconds), 3)
         applied = store.update_progress(task_id, progress)
         return {"ok": True, "applied": applied}
+
+    @app.post(f"{settings.base_path}/api/internal/pod-jobs/{{pod_id}}/next")
+    async def next_pod_job(request: Request, pod_id: str):
+        """A warm worker asks for its next job; 204 means keep waiting."""
+        configured_token = settings.video_upload_token
+        supplied = request.headers.get("authorization", "")
+        if not configured_token:
+            raise HTTPException(status_code=503, detail="Pod 回调通道尚未配置")
+        if not hmac.compare_digest(supplied, f"Bearer {configured_token}"):
+            raise HTTPException(status_code=401, detail="Pod 回调凭据无效")
+        store: TaskStore = request.app.state.store
+        pod = store.get_pod(pod_id)
+        if not pod or pod["state"] == "deleted":
+            # Retired: the worker stops asking and waits to be deleted.
+            raise HTTPException(status_code=404, detail="Pod 未登记或已回收")
+        provider = str(pod["provider"])
+        lane = _lane_settings(provider)
+        if lane is None or lane.keep_warm_idle_seconds <= 0:
+            return Response(status_code=204)
+        lived = (
+            datetime.now(timezone.utc) - datetime.fromisoformat(pod["created_at"])
+        ).total_seconds()
+        if lived > lane.max_pod_lifetime_seconds:
+            # Draining: no new work; the guard deletes it once idle.
+            return Response(status_code=204)
+        task = await asyncio.to_thread(store.claim_next_task, pod_id)
+        if task is None:
+            return Response(status_code=204)
+        task_id = str(task["id"])
+        job: dict[str, Any] | None = None
+        result_url = progress_url = ""
+        for client in POD_CLIENT_FACTORIES[provider]():
+            job = client.job_input(
+                prompt=task["prompt"],
+                ratio=task["ratio"],
+                resolution=task["resolution"],
+                duration=int(task["duration"]),
+                generate_audio=bool(task.get("generate_audio", 1)),
+            )
+            result_url, progress_url = client.callback_urls(task_id)
+        if job is None:
+            raise HTTPException(status_code=503, detail="Pod 链路客户端不可用")
+        now = _now()
+        waited = (
+            datetime.now(timezone.utc) - datetime.fromisoformat(task["created_at"])
+        ).total_seconds()
+        store.update_remote(
+            task_id,
+            {
+                "status": "queued",
+                "content": {
+                    **pod["metadata"],
+                    "pod_created_at": pod["created_at"],
+                    # The runtime cap counts from the hand-over on a reused Pod.
+                    "job_started_at": now,
+                    "gpu_wait_seconds": round(waited, 1),
+                    "gpu_acquire_attempts": 0,
+                    "pod_reused": True,
+                    "pod_jobs_before": int(pod.get("jobs_completed") or 0),
+                    "progress": {"stage": "pod_reused", "at": now},
+                },
+                "error": None,
+            },
+        )
+        return {
+            "job": {
+                "task_id": task_id,
+                "input": job,
+                "result_url": result_url,
+                "progress_url": progress_url,
+            }
+        }
 
     @app.get(f"{settings.base_path}/media/{{filename}}")
     async def generated_video(request: Request, filename: str):
@@ -990,11 +1381,24 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         is_self_hosted = model in SELF_HOSTED_MODELS
         store: TaskStore = request.app.state.store
         provider = SELF_HOSTED_PROVIDERS.get(model, "seedance")
-        if is_self_hosted and store.active_runpod(provider):
-            raise HTTPException(
-                status_code=429,
-                detail="自建 GPU 当前已有任务，请等待完成后再提交",
-            )
+        if is_self_hosted:
+            unfinished = store.active_runpod(provider)
+            if provider in POD_PROVIDERS and settings.runpod_cost_guard_enabled:
+                # The guard loop runs one Pod per lane and a warm worker pulls
+                # the queue in order, so a few tasks may line up behind it.
+                if len(unfinished) >= MAX_UNFINISHED_POD_TASKS:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            f"自建 GPU 队列已满（最多 {MAX_UNFINISHED_POD_TASKS} 个未完成任务），"
+                            "请等待完成后再提交"
+                        ),
+                    )
+            elif unfinished:
+                raise HTTPException(
+                    status_code=429,
+                    detail="自建 GPU 当前已有任务，请等待完成后再提交",
+                )
         if is_self_hosted and resolution == "1080p":
             supported = "480p、720p 或 768p" if model == H3_MODEL else "480p 或 720p"
             raise HTTPException(status_code=422, detail=f"自建模型首版仅支持 {supported}")

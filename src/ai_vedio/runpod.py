@@ -247,39 +247,98 @@ class RunPodPodClient:
             if exc.status_code != 404:
                 raise
 
-    def create_text_video(self, *, prompt: str, model: str, **options: Any) -> dict[str, Any]:
-        if model != self.settings.ui_model_id:
-            raise ValueError(f"Unknown self-hosted Pod model: {model}")
-        task_id = str(options.get("task_id") or "").strip()
-        if not task_id:
-            raise ValueError("task_id is required for the Wan Pod callback")
+    def list_pods(self) -> list[dict[str, Any]]:
+        """Every Pod on the account, reduced to id, name and status.
+
+        The guard loop compares this against the Pods it knows about: a Pod
+        wearing this lane's production name that the control plane is not
+        tracking is billing for nobody and gets deleted.
+        """
+        body = self._request("GET", "/pods")  # rp-migrate: ignore
+        rows: Any = body.get("pods") if isinstance(body, dict) else body
+        pods: list[dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            pods.append(
+                {
+                    "id": str(row["id"]),
+                    "name": str(row.get("name") or ""),
+                    "status": str(
+                        row.get("status") or row.get("desiredStatus") or ""
+                    ).lower(),
+                }
+            )
+        return pods
+
+    def callback_urls(self, task_id: str) -> tuple[str, str]:
+        """(terminal-result URL, live-progress URL) for one task.
+
+        The live-progress route lives next to the terminal-result route; a
+        customized callback URL without the standard suffix opts out cleanly.
+        """
         callback_url = f"{self.settings.callback_url.rstrip('/')}/{task_id}"
-        # The live-progress route lives next to the terminal-result route; a
-        # customized callback URL without the standard suffix opts out cleanly.
         progress_url = ""
         if "/pod-result" in callback_url:
             progress_url = callback_url.replace("/pod-result", "/pod-progress")
-        smoke_input: dict[str, Any] = {
+        return callback_url, progress_url
+
+    def jobs_base_url(self) -> str:
+        """Where a warm worker asks for its next job; empty when keep-warm is off."""
+        if self.settings.keep_warm_idle_seconds <= 0:
+            return ""
+        base = self.settings.callback_url.rstrip("/")
+        if "/pod-result" not in base:
+            return ""
+        return base.replace("/pod-result", "/pod-jobs")
+
+    def job_input(
+        self,
+        *,
+        prompt: str,
+        ratio: str = "16:9",
+        resolution: str = "480p",
+        duration: int = 5,
+        generate_audio: bool = True,
+    ) -> dict[str, Any]:
+        """The worker's job input: the request plus this lane's pinned weights."""
+        job: dict[str, Any] = {
             "prompt": prompt.strip(),
             "model_id": self.settings.model_id,
             "model_version": self.settings.model_version,
             "workflow_version": self.settings.workflow_version,
-            "ratio": options.get("ratio", "16:9"),
-            "resolution": options.get("resolution", "480p"),
-            "duration": options.get("duration", 5),
-            "generate_audio": options.get("generate_audio", True),
+            "ratio": ratio,
+            "resolution": resolution,
+            "duration": duration,
+            "generate_audio": generate_audio,
         }
         # Each lane pins its adult layer with exactly one of these shapes, and
         # the Worker rejects the job when the submitted pin disagrees with the
         # weights it actually loaded. Wan adapts a base model with a LoRA; H3
         # swaps the whole transformer for a fine-tuned checkpoint.
         if self.settings.adult_adapter_id:
-            smoke_input["adult_adapter_id"] = self.settings.adult_adapter_id
-            smoke_input["adult_adapter_version"] = self.settings.adult_adapter_version
-            smoke_input["adult_adapter_strength"] = self.settings.adult_adapter_strength
+            job["adult_adapter_id"] = self.settings.adult_adapter_id
+            job["adult_adapter_version"] = self.settings.adult_adapter_version
+            job["adult_adapter_strength"] = self.settings.adult_adapter_strength
         if self.settings.adult_model_id:
-            smoke_input["adult_model_id"] = self.settings.adult_model_id
-            smoke_input["adult_model_version"] = self.settings.adult_model_version
+            job["adult_model_id"] = self.settings.adult_model_id
+            job["adult_model_version"] = self.settings.adult_model_version
+        return job
+
+    def create_text_video(self, *, prompt: str, model: str, **options: Any) -> dict[str, Any]:
+        if model != self.settings.ui_model_id:
+            raise ValueError(f"Unknown self-hosted Pod model: {model}")
+        task_id = str(options.get("task_id") or "").strip()
+        if not task_id:
+            raise ValueError("task_id is required for the Wan Pod callback")
+        callback_url, progress_url = self.callback_urls(task_id)
+        smoke_input = self.job_input(
+            prompt=prompt,
+            ratio=options.get("ratio", "16:9"),
+            resolution=options.get("resolution", "480p"),
+            duration=options.get("duration", 5),
+            generate_audio=options.get("generate_audio", True),
+        )
         template = self._request("GET", f"/templates/{self.settings.template_id}")
         template_env = template.get("env") if isinstance(template.get("env"), dict) else {}
         pod_env = {
@@ -290,6 +349,11 @@ class RunPodPodClient:
         }
         if progress_url:
             pod_env["POD_PROGRESS_CALLBACK_URL"] = progress_url
+        # With keep-warm on, the worker appends its own RUNPOD_POD_ID and asks
+        # here for the next job once the first one is delivered.
+        jobs_base_url = self.jobs_base_url()
+        if jobs_base_url:
+            pod_env["POD_JOBS_BASE_URL"] = jobs_base_url
         if self.settings.use_management_api_v1:
             # rp-migrate: keep-v1 start
             payload = {  # rp-migrate: keep-v1

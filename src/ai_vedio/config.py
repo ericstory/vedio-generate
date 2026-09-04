@@ -95,6 +95,15 @@ class RunPodPodSettings:
     acquire_retry_seconds: float = 20.0
     maximum_price_per_hour: float = 3.0
     maximum_runtime_seconds: int = 1800
+    # Keep-warm. After a successful job the Pod stays up and its worker pulls
+    # the next queued task from the control plane, which deletes the Pod once
+    # it has sat idle this long. 0 keeps the one-shot contract: delete on the
+    # terminal callback. Only enable for lanes whose worker image pulls jobs,
+    # otherwise every job pays the idle window for nothing.
+    keep_warm_idle_seconds: float = 0.0
+    # A warm Pod stops taking new jobs and is deleted once idle after living
+    # this long. A ceiling against a tracking bug, not a scheduling feature.
+    max_pod_lifetime_seconds: float = 4 * 3600.0
     model_id: str = "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"
     model_version: str = "2c5a06469cd2255816eb2e46b8e11600ed435d52"
     workflow_version: str = "wan22-t2v-fp8-resident96-adult-lora-audio-v5"
@@ -264,6 +273,10 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
         acquire_retry_seconds=float(
             os.getenv("RUNPOD_WAN_POD_ACQUIRE_RETRY_SECONDS", "20")
         ),
+        keep_warm_idle_seconds=float(os.getenv("RUNPOD_WAN_POD_KEEP_WARM_SECONDS", "0")),
+        max_pod_lifetime_seconds=float(
+            os.getenv("RUNPOD_WAN_POD_MAX_LIFETIME_SECONDS", "14400")
+        ),
         model_id=os.getenv("WAN_MODEL_ID", "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"),
         model_version=os.getenv(
             "WAN_MODEL_VERSION", "2c5a06469cd2255816eb2e46b8e11600ed435d52"
@@ -324,6 +337,10 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
         ),
         acquire_retry_seconds=float(
             os.getenv("RUNPOD_H3_POD_ACQUIRE_RETRY_SECONDS", "20")
+        ),
+        keep_warm_idle_seconds=float(os.getenv("RUNPOD_H3_POD_KEEP_WARM_SECONDS", "0")),
+        max_pod_lifetime_seconds=float(
+            os.getenv("RUNPOD_H3_POD_MAX_LIFETIME_SECONDS", "14400")
         ),
         container_disk_gb=int(os.getenv("RUNPOD_H3_POD_CONTAINER_DISK_GB", "220")),
         model_id=os.getenv("H3_MODEL_ID", "MiniMaxAI/MiniMax-H3"),

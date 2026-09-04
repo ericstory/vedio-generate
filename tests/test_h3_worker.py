@@ -296,7 +296,7 @@ def test_h3_smoke_failure_callback_carries_the_worker_log_tail() -> None:
     assert "os.dup2(tee.stdin.fileno(), 2)" in source
     assert "--- worker log tail ---" in source
     # Tee is wired up before the handler runs, so the child's output is captured.
-    assert source.index("_tee_process_output()\n") < source.index('handler({"id": "h3-pod-smoke"')
+    assert source.index("_tee_process_output()\n") < source.index('run_job("h3-pod-smoke"')
 
 
 def test_h3_handler_trusts_the_pinned_snapshot_code_and_takes_template_overrides() -> None:
@@ -437,3 +437,106 @@ def test_h3_download_regroups_pinkcherry_and_ships_the_module() -> None:
     dockerfile = (WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "regroup_qkv_in_place(nsfw_path)" in download
     assert "regroup_qkv.py /app/" in dockerfile
+
+
+def load_smoke(monkeypatch):
+    """Import smoke.py with the GPU handler stubbed out."""
+    import sys
+    import types
+
+    stub = types.ModuleType("handler")
+    stub.handler = lambda job: {"video_url": "/generate/media/x.mp4", "job": job["id"]}
+    monkeypatch.setitem(sys.modules, "handler", stub)
+    spec = importlib.util.spec_from_file_location("h3_smoke", WORKER_ROOT / "smoke.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _Response:
+    def __init__(self, status_code: int, body: dict | None = None):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise smoke_httpx_error(self.status_code)
+
+
+def smoke_httpx_error(status_code: int):
+    import httpx
+
+    return httpx.HTTPStatusError(f"HTTP {status_code}", request=None, response=None)  # type: ignore[arg-type]
+
+
+def test_h3_smoke_pulls_jobs_while_warm_and_stops_when_retired(monkeypatch) -> None:
+    """After the first job the loaded model takes the queue until the control plane retires the Pod."""
+    smoke = load_smoke(monkeypatch)
+    monkeypatch.setenv("POD_JOBS_BASE_URL", "https://host.example/generate/api/internal/pod-jobs")
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-42")
+    assert smoke.jobs_url() == "https://host.example/generate/api/internal/pod-jobs/pod-42/next"
+    monkeypatch.delenv("RUNPOD_POD_ID")
+    assert smoke.jobs_url() == ""
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-42")
+
+    answers = [
+        _Response(204),
+        _Response(503),
+        _Response(200, {"job": {"task_id": "t1", "input": {"prompt": "one"}, "result_url": "https://host.example/r/t1", "progress_url": "https://host.example/p/t1"}}),
+        _Response(200, {"job": {"task_id": "t2", "input": {"prompt": "two"}, "result_url": "https://host.example/r/t2", "progress_url": "https://host.example/p/t2"}}),
+        _Response(404),
+    ]
+    posted: list[tuple[str, dict]] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        posted.append((url, headers))
+        return answers.pop(0)
+
+    monkeypatch.setattr(smoke.httpx, "post", fake_post)
+    ran: list[tuple[str, dict, str]] = []
+    slept: list[float] = []
+
+    def run(task_id: str, params: dict) -> bool:
+        ran.append((task_id, params, smoke.os.environ["POD_RESULT_CALLBACK_URL"]))
+        return True
+
+    smoke.pull_jobs(smoke.jobs_url(), "tok", run, sleep=slept.append)
+    assert [r[0] for r in ran] == ["t1", "t2"]
+    assert ran[0][1] == {"prompt": "one"}
+    # Each pulled job re-points the callbacks the handler reads at call time.
+    assert ran[0][2] == "https://host.example/r/t1" and ran[1][2] == "https://host.example/r/t2"
+    assert smoke.os.environ["POD_PROGRESS_CALLBACK_URL"] == "https://host.example/p/t2"
+    assert all(h == {"Authorization": "Bearer tok"} for _, h in posted)
+    assert len(slept) == 2  # once for 204, once for the 503 blip
+    assert answers == []
+
+    # A failed job ends the loop too: the control plane deletes the Pod on failure.
+    answers.append(_Response(200, {"job": {"task_id": "t3", "input": {}, "result_url": "u", "progress_url": ""}}))
+    smoke.pull_jobs(smoke.jobs_url(), "tok", lambda task_id, params: False, sleep=slept.append)
+    assert answers == []
+
+
+def test_h3_smoke_result_declares_whether_the_worker_pulls_jobs(monkeypatch) -> None:
+    smoke = load_smoke(monkeypatch)
+    monkeypatch.setenv("POD_RESULT_CALLBACK_URL", "https://host.example/r/t1")
+    monkeypatch.setenv("POD_RESULT_CALLBACK_TOKEN", "tok")
+    sent: list[dict] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.append(json)
+        return _Response(200, {"ok": True})
+
+    monkeypatch.setattr(smoke.httpx, "post", fake_post)
+    monkeypatch.delenv("POD_JOBS_BASE_URL", raising=False)
+    assert smoke._post_result({"status": "succeeded", "content": {}, "error": None})
+    assert sent[-1]["worker"] == {"pulls_jobs": False}
+    monkeypatch.setenv("POD_JOBS_BASE_URL", "https://host.example/generate/api/internal/pod-jobs")
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-42")
+    assert smoke.run_job("job-1", {"prompt": "x"}) is True
+    assert sent[-1]["status"] == "succeeded"
+    assert sent[-1]["worker"] == {"pulls_jobs": True}
+    assert sent[-1]["content"]["job"] == "job-1"

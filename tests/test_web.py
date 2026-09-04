@@ -740,15 +740,24 @@ def test_pod_task_is_queued_without_touching_the_provider(tmp_path: Path, monkey
         assert task["provider_task_id"] == ""
         assert task["generate_audio"] is False
         assert task["provider_metadata"]["progress"]["stage"] == "awaiting_gpu"
-        # A second submission waits behind the queued one exactly like a running Pod.
-        again = client.post(
+        # A few more submissions line up behind it for the (possibly warm)
+        # Pod; past the queue depth the lane says so instead of piling on.
+        for _ in range(web.MAX_UNFINISHED_POD_TASKS - 1):
+            again = client.post(
+                "/generate/api/tasks",
+                data={"prompt": "another", "model": "minimax-h3-pinkcherry", "resolution": "768p", "duration": 5},
+            )
+            assert again.status_code == 201
+        full = client.post(
             "/generate/api/tasks",
-            data={"prompt": "another", "model": "minimax-h3-pinkcherry", "resolution": "768p", "duration": 5},
+            data={"prompt": "one too many", "model": "minimax-h3-pinkcherry", "resolution": "768p", "duration": 5},
         )
-        assert again.status_code == 429
+        assert full.status_code == 429
+        assert "队列已满" in full.json()["detail"]
         # Listing must not try to poll a Pod that does not exist yet.
         listed = client.get("/generate/api/tasks").json()["tasks"]
-        assert listed[0]["id"] == task["id"]
+        assert len(listed) == web.MAX_UNFINISHED_POD_TASKS
+        assert listed[-1]["id"] == task["id"]
 
 
 def test_guard_acquires_a_pod_for_a_queued_task(tmp_path: Path, monkeypatch) -> None:
@@ -965,3 +974,370 @@ def test_store_restart_keeps_queued_pod_tasks_without_a_pod(tmp_path: Path) -> N
     assert reopened.get("legacy-seedance")["provider_task_id"] == "legacy-seedance"
     assert [task["id"] for task in reopened.pending_pod_tasks("runpod_h3_pod")] == ["queued-h3"]
     assert reopened.pending_pod_tasks("runpod_wan_pod") == []
+
+
+# -- Keep-warm: one Pod per lane, reused by the next queued task ---------------
+
+
+def _iso(delta: timedelta) -> str:
+    return (datetime.now(timezone.utc) - delta).isoformat()
+
+
+def _warm_pod(
+    store: TaskStore,
+    pod_id: str = "pod-warm",
+    *,
+    idle_for: timedelta = timedelta(seconds=10),
+    lived: timedelta = timedelta(minutes=5),
+) -> None:
+    """An idle Pod that already delivered one job."""
+    store.register_pod(
+        "runpod_h3_pod",
+        pod_id,
+        task_id="delivered",
+        metadata={"gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "pod_price_per_hour": 2.09},
+    )
+    assert store.release_pod(pod_id, task_id="delivered")
+    with store.connect() as db:
+        db.execute(
+            "UPDATE pods SET idle_since=?, created_at=? WHERE id=?",
+            (_iso(idle_for), _iso(lived), pod_id),
+        )
+
+
+class _WarmLaneClient:
+    """A Pod client for a lane with keep-warm on; records deletions."""
+
+    def __init__(self, deleted: list[str], pods: list[dict] | None = None, **settings):
+        self.settings = _pod_settings(
+            **{"keep_warm_idle_seconds": 600, "name_prefix": "papa-h3", **settings}
+        )
+        self.deleted = deleted
+        self.pods = pods
+
+    def create_text_video(self, **kwargs):
+        raise AssertionError("a lane with a live Pod must not ask RunPod for another")
+
+    def get_task(self, pod_id: str):
+        return {"id": pod_id, "status": "processing", "content": {}, "error": None}
+
+    def delete_pod(self, pod_id: str):
+        self.deleted.append(pod_id)
+
+    def list_pods(self):
+        return list(self.pods or [])
+
+    def job_input(self, **kwargs):
+        return {"model_id": "MiniMaxAI/MiniMax-H3", **kwargs}
+
+    def callback_urls(self, task_id: str):
+        base = self.settings.callback_url
+        return f"{base}/{task_id}", f"{base.replace('/pod-result', '/pod-progress')}/{task_id}"
+
+
+def _install_lane(monkeypatch, client) -> None:
+    def factory():
+        yield client
+
+    monkeypatch.setenv("RUNPOD_H3_POD_TEMPLATE_ID", "tpl")
+    monkeypatch.delenv("RUNPOD_WAN_POD_TEMPLATE_ID", raising=False)
+    monkeypatch.setattr(web, "_h3_pod_client", factory)
+    monkeypatch.setattr(web, "_runpod_provider_cost_guard_tick", lambda *a, **k: False)
+    web._last_orphan_sweep.clear()
+
+
+def _running_task(store: TaskStore, task_id: str, pod_id: str, **metadata) -> None:
+    store.create(
+        {
+            "id": task_id,
+            "provider": "runpod_h3_pod",
+            "provider_task_id": pod_id,
+            "prompt": "x",
+            "model": "minimax-h3-pinkcherry",
+            "ratio": "16:9",
+            "resolution": "768p",
+            "duration": 5,
+            "has_reference": 0,
+            "status": "processing",
+            "created_at": _iso(timedelta(minutes=3)),
+        }
+    )
+    if metadata:
+        store.update_remote(task_id, {"status": "processing", "content": metadata, "error": None})
+
+
+def test_pod_result_keeps_a_pulling_worker_warm_and_deletes_everything_else(tmp_path: Path, monkeypatch) -> None:
+    """Only a success from a worker that will pull more work earns the idle window."""
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted))
+    for task_id, pod_id in (("t-warm", "pod-a"), ("t-oneshot", "pod-b"), ("t-failed", "pod-c")):
+        _running_task(store, task_id, pod_id)
+        store.register_pod("runpod_h3_pod", pod_id, task_id=task_id)
+    app = create_app(settings)
+    headers = {"Authorization": "Bearer callback-token"}
+    with TestClient(app) as client:
+        ok = client.post(
+            "/generate/api/internal/pod-result/t-warm",
+            headers=headers,
+            json={"status": "succeeded", "content": {"video_url": "/generate/media/a.mp4"}, "error": None, "worker": {"pulls_jobs": True}},
+        )
+        assert ok.status_code == 200
+        assert deleted == []
+        pod = store.get_pod("pod-a")
+        assert pod and pod["state"] == "idle" and pod["current_task_id"] is None
+        assert pod["jobs_completed"] == 1 and pod["idle_since"]
+
+        # The same success from a worker image that never asks for more work.
+        client.post(
+            "/generate/api/internal/pod-result/t-oneshot",
+            headers=headers,
+            json={"status": "succeeded", "content": {"video_url": "/generate/media/b.mp4"}, "error": None},
+        )
+        # A failure is never kept warm, even from a pulling worker: a bad host
+        # is the usual reason and the next task deserves a fresh Pod.
+        client.post(
+            "/generate/api/internal/pod-result/t-failed",
+            headers=headers,
+            json={"status": "failed", "content": {}, "error": "CUDA error", "worker": {"pulls_jobs": True}},
+        )
+    assert deleted == ["pod-b", "pod-c"]
+    assert store.get_pod("pod-b")["state"] == "deleted"
+    assert store.get_pod("pod-c")["state"] == "deleted"
+    assert store.live_pod("runpod_h3_pod")["id"] == "pod-a"
+
+
+def test_pod_result_deletes_the_pod_when_the_lane_has_keep_warm_off(tmp_path: Path, monkeypatch) -> None:
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted, keep_warm_idle_seconds=0))
+    _running_task(store, "t1", "pod-a")
+    store.register_pod("runpod_h3_pod", "pod-a", task_id="t1")
+    with TestClient(create_app(settings)) as client:
+        client.post(
+            "/generate/api/internal/pod-result/t1",
+            headers={"Authorization": "Bearer callback-token"},
+            json={"status": "succeeded", "content": {}, "error": None, "worker": {"pulls_jobs": True}},
+        )
+    assert deleted == ["pod-a"]
+
+
+def test_warm_worker_pulls_the_next_queued_task(tmp_path: Path, monkeypatch) -> None:
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    _warm_pod(store)
+    _queued_h3_task(store, "second", created_at=_iso(timedelta(seconds=30)))
+    _queued_h3_task(store, "first", created_at=_iso(timedelta(seconds=90)))
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted))
+    headers = {"Authorization": "Bearer callback-token"}
+    with TestClient(create_app(settings)) as client:
+        assert client.post("/generate/api/internal/pod-jobs/pod-warm/next").status_code == 401
+        assert client.post("/generate/api/internal/pod-jobs/nobody/next", headers=headers).status_code == 404
+
+        response = client.post("/generate/api/internal/pod-jobs/pod-warm/next", headers=headers)
+        assert response.status_code == 200
+        job = response.json()["job"]
+        # Oldest first, with the lane's pinned weights and this task's callbacks.
+        assert job["task_id"] == "first"
+        assert job["input"]["prompt"] == "cinematic sunrise"
+        assert job["input"]["resolution"] == "768p"
+        assert job["input"]["generate_audio"] is False
+        assert job["input"]["model_id"] == "MiniMaxAI/MiniMax-H3"
+        assert job["result_url"].endswith("/pod-result/first")
+        assert job["progress_url"].endswith("/pod-progress/first")
+
+        task = store.get("first")
+        assert task["provider_task_id"] == "pod-warm"
+        metadata = task["provider_metadata"]
+        assert metadata["pod_reused"] is True
+        assert metadata["pod_jobs_before"] == 1
+        assert metadata["gpu_name"].startswith("NVIDIA RTX PRO 6000")
+        assert metadata["job_started_at"] and metadata["pod_created_at"]
+        assert metadata["progress"]["stage"] == "pod_reused"
+        pod = store.get_pod("pod-warm")
+        assert pod["state"] == "busy" and pod["current_task_id"] == "first"
+
+        # Busy Pods get nothing more until their result lands.
+        assert client.post("/generate/api/internal/pod-jobs/pod-warm/next", headers=headers).status_code == 204
+        client.post(
+            "/generate/api/internal/pod-result/first",
+            headers=headers,
+            json={"status": "succeeded", "content": {"video_url": "/generate/media/1.mp4"}, "error": None, "worker": {"pulls_jobs": True}},
+        )
+        again = client.post("/generate/api/internal/pod-jobs/pod-warm/next", headers=headers)
+        assert again.status_code == 200 and again.json()["job"]["task_id"] == "second"
+        client.post(
+            "/generate/api/internal/pod-result/second",
+            headers=headers,
+            json={"status": "succeeded", "content": {}, "error": None, "worker": {"pulls_jobs": True}},
+        )
+        # Nothing queued: keep waiting, the guard owns the idle window.
+        assert client.post("/generate/api/internal/pod-jobs/pod-warm/next", headers=headers).status_code == 204
+        store.retire_pod("pod-warm")
+        # Retired: the worker stops asking and waits to be deleted.
+        assert client.post("/generate/api/internal/pod-jobs/pod-warm/next", headers=headers).status_code == 404
+    assert deleted == []
+    assert store.get_pod("pod-warm")["jobs_completed"] == 3
+
+
+def test_drained_pod_gets_no_new_jobs(tmp_path: Path, monkeypatch) -> None:
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    _warm_pod(store, lived=timedelta(hours=5))
+    _queued_h3_task(store)
+    _install_lane(monkeypatch, _WarmLaneClient([]))
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/generate/api/internal/pod-jobs/pod-warm/next",
+            headers={"Authorization": "Bearer callback-token"},
+        )
+    assert response.status_code == 204
+    assert store.get("queued-h3")["provider_task_id"] == ""
+
+
+def test_guard_queues_behind_a_live_pod_instead_of_starting_a_second(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _warm_pod(store)
+    _queued_h3_task(store, "a", created_at=_iso(timedelta(seconds=60)))
+    _queued_h3_task(store, "b", created_at=_iso(timedelta(seconds=30)))
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted))
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    assert deleted == []
+    for task_id, position in (("a", 1), ("b", 2)):
+        task = store.get(task_id)
+        assert task["provider_task_id"] == ""
+        progress = task["provider_metadata"]["progress"]
+        assert progress["stage"] == "awaiting_worker"
+        assert progress["position"] == position
+        assert progress["pod"] == "pod-warm"
+        assert progress["acquire_started_at"]
+
+
+def test_acquire_deadline_starts_when_runpod_is_actually_asked(tmp_path: Path, monkeypatch) -> None:
+    """Twenty minutes behind a busy Pod must not count against the 15 minute capacity window."""
+    store = TaskStore(tmp_path / "tasks.db")
+    _queued_h3_task(store, created_at=_iso(timedelta(minutes=20)))
+    store.update_progress(
+        "queued-h3",
+        {"stage": "awaiting_worker", "position": 1, "attempts": 0, "acquire_started_at": _iso(timedelta(seconds=8))},
+    )
+    seen: list[dict] = []
+
+    class Fresh:
+        settings = _pod_settings()
+
+        def create_text_video(self, **kwargs):
+            seen.append(kwargs)
+            return {"id": "pod-new", "status": "queued", "content": {"gpu_name": "g", "pod_price_per_hour": 2.09}, "error": None}
+
+        def get_task(self, pod_id: str):
+            return {"id": pod_id, "status": "processing", "content": {}, "error": None}
+
+        def delete_pod(self, pod_id: str):
+            raise AssertionError("nothing to delete")
+
+    _install_lane(monkeypatch, Fresh())
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    assert len(seen) == 1
+    task = store.get("queued-h3")
+    assert task["provider_task_id"] == "pod-new"
+    # The queue wait is still reported honestly.
+    assert task["provider_metadata"]["gpu_wait_seconds"] > 1000
+    assert task["provider_metadata"]["job_started_at"]
+    pod = store.get_pod("pod-new")
+    assert pod and pod["state"] == "busy" and pod["current_task_id"] == "queued-h3"
+    assert pod["metadata"]["pod_price_per_hour"] == 2.09
+
+
+def test_guard_deletes_a_warm_pod_after_the_idle_window(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _warm_pod(store, idle_for=timedelta(seconds=100))
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted))
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    assert deleted == []
+    with store.connect() as db:
+        db.execute("UPDATE pods SET idle_since=? WHERE id='pod-warm'", (_iso(timedelta(seconds=700)),))
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is False
+    assert deleted == ["pod-warm"]
+    assert store.get_pod("pod-warm")["state"] == "deleted"
+    assert store.live_pod("runpod_h3_pod") is None
+
+
+def test_guard_deletes_a_warm_pod_past_its_lifetime(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _warm_pod(store, idle_for=timedelta(seconds=5), lived=timedelta(hours=5))
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted))
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    assert deleted == ["pod-warm"]
+
+
+def test_guard_sweeps_orphaned_production_pods_only(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _warm_pod(store)
+    deleted: list[str] = []
+    listed = [
+        {"id": "pod-warm", "name": "papa-h3-0123456789ab", "status": "running"},
+        {"id": "forgotten", "name": "papa-h3-fedcba987654", "status": "running"},
+        {"id": "diag", "name": "papa-h3-resident40-12345", "status": "running"},
+        {"id": "other-lane", "name": "papa-wan-0123456789ab", "status": "running"},
+    ]
+    _install_lane(monkeypatch, _WarmLaneClient(deleted, pods=listed))
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    assert deleted == ["forgotten"]
+    # Once a minute is plenty; the next tick does not list again.
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    assert deleted == ["forgotten"]
+
+
+def test_runtime_cap_counts_from_the_hand_over_on_a_reused_pod(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _running_task(
+        store, "reused", "pod-warm",
+        pod_created_at=_iso(timedelta(minutes=50)), job_started_at=_iso(timedelta(minutes=2)),
+    )
+    store.register_pod("runpod_h3_pod", "pod-warm", task_id="reused")
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted))
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    assert deleted == [] and store.get("reused")["status"] == "processing"
+    store.update_remote("reused", {"status": "processing", "content": {"job_started_at": _iso(timedelta(minutes=31))}, "error": None})
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    assert deleted == ["pod-warm"]
+    assert store.get("reused")["status"] == "failed"
+    assert store.get_pod("pod-warm")["state"] == "deleted"
+
+
+def test_pod_claims_and_retirement_have_a_single_winner(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _warm_pod(store)
+    _queued_h3_task(store, "a", created_at=_iso(timedelta(seconds=60)))
+    _queued_h3_task(store, "b", created_at=_iso(timedelta(seconds=30)))
+    claimed = store.claim_next_task("pod-warm")
+    assert claimed and claimed["id"] == "a"
+    # Busy now: an idle-only retirement (the idle-timeout path) must lose.
+    assert store.claim_next_task("pod-warm") is None
+    assert store.retire_pod("pod-warm", from_states=("idle",)) is False
+    assert store.get_pod("pod-warm")["state"] == "busy"
+    assert store.release_pod("pod-warm", task_id="wrong-task") is False
+    assert store.release_pod("pod-warm", task_id="a") is True
+    assert store.retire_pod("pod-warm", from_states=("idle",)) is True
+    assert store.retire_pod("pod-warm") is False
+    assert store.claim_next_task("pod-warm") is None
+    assert store.get("b")["provider_task_id"] == ""
+
+
+def test_runtime_cap_still_deletes_a_pod_the_table_never_saw(tmp_path: Path, monkeypatch) -> None:
+    """Tasks that got their Pod before the pods table existed keep the old cap."""
+    store = TaskStore(tmp_path / "tasks.db")
+    _running_task(store, "legacy", "pod-untracked", pod_created_at=_iso(timedelta(minutes=31)))
+    deleted: list[str] = []
+    _install_lane(monkeypatch, _WarmLaneClient(deleted))
+    _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+    assert deleted == ["pod-untracked"]
+    assert store.get("legacy")["status"] == "failed"

@@ -245,6 +245,12 @@ def residency_profile(total_vram_gb: float) -> dict[str, Any]:
     # smaller tiers are scaled guesses that nothing has timed yet. Explicit
     # layerwise selection outranks the legacy *_cpu_offload flags in SGLang's
     # residency resolution, so the flags below only document intent.
+    #
+    # Measured 2026-09-04 (diagnostic Pod, H3_EXTRA_SERVER_ARGS_JSON override,
+    # 768p/5 s): 40 resident layers gave 111.0 s of denoise and a 45,616 MB
+    # peak -- byte-identical to the 25-layer peak and inside the 108-111 s
+    # spread of the 25-layer runs. With prefetch 2 the layer streaming is fully
+    # hidden, so more resident layers buy nothing here; leave this at 25.
     if total_vram_gb >= 80:
         return {
             "performance_mode": "memory",

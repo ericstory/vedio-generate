@@ -18,6 +18,7 @@ const selfHostedModels = new Set(['minimax-h3-pinkcherry', 'pinkcherry-ltx-2.3-v
 const H3_MODEL = 'minimax-h3-pinkcherry';
 const progressStageNames = {
   awaiting_gpu: '正在申请云 GPU 机器', pod_created: '云 GPU 已分配，正在启动',
+  awaiting_worker: '已排队，等待云 GPU 完成当前任务', pod_reused: '复用已就绪的云 GPU，直接开始推理',
   gpu_probe: '正在检查 GPU', model_download_start: '正在下载模型权重（约 2 分钟）', model_download_done: '模型权重就绪',
   model_load_start: '正在加载视频模型', model_load_done: '模型就绪，视频推理中',
   video_start: '视频推理中', video_done: '视频推理完成',
@@ -29,6 +30,7 @@ function progressLabel(progress) {
   if (!progress || !progress.stage) return '';
   const label = progressStageNames[progress.stage] || '';
   if (progress.stage === 'awaiting_gpu' && progress.attempts > 0) return `${label}（已申请 ${progress.attempts} 次，容量空出后自动开始）`;
+  if (progress.stage === 'awaiting_worker' && progress.position > 1) return `${label}（前面还有 ${progress.position - 1} 个任务）`;
   return label;
 }
 

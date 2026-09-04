@@ -32,9 +32,11 @@ SELF_HOSTED_PROVIDERS = {
     "wan-2.2-a14b-adult-v2": "runpod_wan_pod",
     "minimax-h3-pinkcherry": "runpod_h3_pod",
 }
-# One-shot Pod lanes: the Worker reports its own terminal state and live stages
-# back over the authenticated internal callbacks, and the control plane deletes
-# the billed Pod as soon as the terminal callback commits.
+# Pod lanes: the Worker reports its own terminal state and live stages back over
+# the authenticated internal callbacks. The control plane runs one Pod per lane;
+# a worker that pulls jobs keeps it warm through an idle window, a one-shot
+# worker (or any failure) has the billed Pod deleted as soon as the terminal
+# callback commits.
 POD_PROVIDERS = frozenset({"runpod_wan_pod", "runpod_h3_pod"})
 SEEDANCE_MODELS = frozenset(SUPPORTED_MODELS) - SELF_HOSTED_MODELS
 
