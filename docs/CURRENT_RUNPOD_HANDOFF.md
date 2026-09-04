@@ -64,9 +64,10 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 的 fine-grained token，对 `user/Andrew3453` 有 `repo.write`）。
 `WAN_V2_ENABLED` 仍为 `1`——**故意的**，H3 验证通过前不撤掉可用的 Wan。
 
-2026-09-03 现役模板 `RUNPOD_H3_POD_TEMPLATE_ID=jkrh512m3s`（见第十三节）；
-`RUNPOD_COST_GUARD_ENABLED=1` **现在是硬依赖**——守卫循环负责给排队任务申请 Pod，
-关掉它 web 端的 H3/Wan 任务会退回到请求内同步建 Pod 的老路径。
+2026-09-04 现役模板 `RUNPOD_H3_POD_TEMPLATE_ID=w9e1krvelc`（镜像 `53d64ed`，保温 worker，见第十六节），
+`RUNPOD_H3_POD_KEEP_WARM_SECONDS=600`；
+`RUNPOD_COST_GUARD_ENABLED=1` **现在是硬依赖**——守卫循环负责给排队任务申请 Pod、
+给保温 Pod 计空闲窗口并删除，关掉它 web 端的 H3/Wan 任务会退回到请求内同步建 Pod 的老路径。
 2026-09-02 已切到 volume-free：
 `RUNPOD_H3_POD_NETWORK_VOLUME_ID` **已删除**（Railway CLI 不接受空值，
 未设置在代码里等价于空）；`RUNPOD_H3_POD_ADDITIONAL_GPU_IDS` 是 `gpu_policy.json`
@@ -80,16 +81,17 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 | --- | --- | --- |
 | H3 卷（主） | `n7meo4oft2` | US-NC-2 170GB，已灌满 145,443,261,098 字节 |
 | H3 卷（备） | `qextiwmyla` | US-KS-2 170GB，已灌满 145,443,261,107 字节 |
-| **H3 模板（现役）** | `jkrh512m3s` | volume-free，`5a869e1` 镜像，220GB 容器盘，**无 `H3_EXTRA_SERVER_ARGS_JSON`、无 `H3_LORA_MERGE_MODE`**（全靠代码默认值），`H3_SECONDS_PER_MPIXEL_STEP=0.1` |
-| H3 模板（上一版） | `02hdqp64b1` | `627dded` 镜像 + env 覆盖，第八次成功用的；`jkrh512m3s` 验过后可删 |
-| H3 模板（更早） | `5hwjktbaa2` `sx4pndyt2r` `kdf3q6n3i4` `v3waitxptu` `7xnj6d52vv` `lpalzoy70e` `z2jlkzb9bt` | 迭代残留，可删 |
+| **H3 模板（现役）** | `w9e1krvelc` | volume-free，`53d64ed` 镜像（保温 worker），220GB 容器盘，无 env 覆盖，`H3_SECONDS_PER_MPIXEL_STEP=0.1` |
+| H3 模板（上一版） | `4af0xgv6zs` | `a53b0ac` 镜像（一次性 worker），`w9e1krvelc` 验过后可删 |
+| H3 模板（应急） | `vqnyih9ibx` | 原版 transformer（无 PinkCherry），`5a869e1` 镜像 |
 | LTX 模板 | `km9g8f4guq` | |
 | Wan 模板 | `wjxhc0dtid` | |
 | GHCR 凭据 | `cmtgxws1c003d14njrtc07zd2` | `read:packages` classic PAT |
 
 **当前运行中 Pod：0。** 所有临时/探测 Pod 均已删除。
 
-⚠️ **9 个卷 / 1000GB ≈ $70/月，7×24 计费。** volume-free 跑通后按下面"待清理"处理。
+⚠️ **9 个卷 / 1000GB ≈ $70/月，7×24 计费。** 其中 6 个（760GB）无人引用，删法见第九节第 8 步
+（`scripts/runpod/cleanup_runpod.py`）；上表的两个 H3 卷都在待删名单里。
 
 ---
 
@@ -739,3 +741,32 @@ BytePlus TOS 也可以但 NSFW 内容在国内云上有合规风险）。
 **测试**：116 全过（新增 14：回调保温/一次性/失败三分支、拉活接口含 401/404/204/排空、守卫不建第二个 Pod、
 容量超时从真正申请起算、空闲窗口删、寿命上限删、孤儿清扫只删生产命名、复用 Pod 的运行上限从交接起算、
 表里没有的 Pod 到上限仍删、claim 与 retire 单赢家、smoke 拉活循环、smoke 回调自报 pulls_jobs）。
+
+### 保温上线与验收（2026-09-04 05:05–05:34Z）
+
+CI 构建 `53d64ed` 成功（14 分钟）→ 模板 **`w9e1krvelc`**（`scripts/runpod/h3_make_template.py`，无 env 覆盖）
+→ Railway `RUNPOD_H3_POD_TEMPLATE_ID=w9e1krvelc`、`RUNPOD_H3_POD_KEEP_WARM_SECONDS=600`（`--skip-deploys`）
+→ `railway up`，部署 **`def5f602`** SUCCESS，healthz 200。
+
+两次连续提交（`h3_submit_and_follow.py`，走生产 API，与网页表单同一接口）：
+
+| | 任务 A `e8c0a841`（768p/5 秒） | 任务 B `b87d04ad`（768p/15 秒，A 成功后 4 秒提交） |
+| --- | --- | --- |
+| 拿到 GPU | 1.2 秒，第 1 次申请即成功（Pod `8mu54mng8wtr49`，US-NC-1） | **复用同一个 Pod**：提交后 11 秒已在 `video_start`（`pod_reused=true`，`pod_jobs_before=1`） |
+| 下权重 / 装模型 | 88.5 秒 / 130.6 秒 | **0 / 0** |
+| 推理 | 110.6 秒 | 427.9 秒（冷启动那次 425.1 秒，一致） |
+| 提交 → 成片 | 485 秒 | **439 秒**（同规格冷启动是 725 秒，省 286 秒） |
+| 峰值显存 | 45,616 MB | 46,424 MB |
+| 抽帧 | 真实海上日出，音频 −39 dB 均值 | 真实雪林红狐，音频 −28.5 dB 均值 |
+
+B 结果落库约 05:23:00Z，Pod 在 05:32:37–05:33:41Z 之间被守卫删除（idle 600 秒 + 一个 tick），
+RunPod 运行中 Pod 归零。Pod 总寿命约 25.5 分钟 ≈ $0.89，其中空闲窗口 10 分钟 ≈ $0.35。
+`projected_denoise_seconds` 对 15 秒仍低估（334 vs 428），常数 0.1 → 0.13 的修正要重建模板，未动。
+
+**待办**（按顺序）：
+1. 用户执行 `python3 scripts/runpod/cleanup_runpod.py`（看清单）→ `--yes`；然后
+   `railway variable delete RUNPOD_WAN_ENDPOINT_ID RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID`
+   再 `railway up --detach`（delete 会触发一次重部署，`up` 覆盖即可）。
+2. 删上一版模板 `4af0xgv6zs`（保温模板已验过）。
+3. 第九节第 7 步（10Eros Max）、第 9 步（LTX 迁 Pod 链路，迁完才能删 `fn6at7unxa` 和 `aoma1602mogius`）。
+4. 可选：模板里 `H3_SECONDS_PER_MPIXEL_STEP=0.13` 让 15 秒的投影准一点（只影响显示，不影响守卫判断）。
