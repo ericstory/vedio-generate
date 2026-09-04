@@ -6,7 +6,8 @@ touches the disk: the restorer reads it from the Hub by HTTP Range and only the
 66 GB output is written locally before the upload.
 
 Usage:
-  python3 eros_restore_pod.py create <git-sha> [vcpus]   # create the private repo if needed, launch the Pod
+  python3 eros_restore_pod.py create <git-sha> [vcpus|gpu]   # create the private repo if needed, launch the Pod
+                                                          # (gpu: cheapest secure GPU for its 100 GB disk)
   python3 eros_restore_pod.py watch <pod-id> [seconds]   # print new container log lines for up to N seconds
 
 The Pod pulls restore_pruned_adaln.py and regroup_qkv.py from this repository at
@@ -153,7 +154,20 @@ def ensure_repo():
     print(f"target repo {url} private={info.private} sha={info.sha}")
 
 
-def create(sha: str, vcpus: int):
+# Fallback when no CPU flavour has an 8 vCPU (= 80 GB disk) instance: the
+# cheapest secure GPUs, used only for their disk. The CPU disk cap is 10 GB per
+# vCPU and vcpuCount must be a power of two, so 8 is the only size that fits.
+CHEAP_GPUS = [
+    "NVIDIA RTX 2000 Ada Generation",
+    "NVIDIA RTX A4000",
+    "NVIDIA RTX A4500",
+    "NVIDIA RTX A5000",
+    "NVIDIA L4",
+    "NVIDIA RTX 4000 Ada Generation",
+]
+
+
+def create(sha: str, vcpus: int, gpu: bool = False):
     ensure_repo()
     env = {
         "PAPA_RAW_BASE": f"{GITHUB_RAW}/{sha}",
@@ -167,26 +181,39 @@ def create(sha: str, vcpus: int):
     }
     body = {
         "name": f"papa-eros-restore-{sha[:7]}",
-        "computeType": "CPU",
         "cloudType": "SECURE",
-        "cpuFlavorIds": ["cpu3c", "cpu3g", "cpu5c", "cpu5g"],
-        "cpuFlavorPriority": "custom",
-        "vcpuCount": vcpus,
-        # The 66 GB output plus pip and the index; the inputs are streamed from
-        # the Hub. 80 GB is the cpu3 ceiling (cpu5 allows 120), and a Pod
-        # volume is silently ignored for CPU Pods, so this is all the disk there is.
-        "containerDiskInGb": 80,
         "volumeInGb": 0,
         "imageName": "python:3.12-slim",
         "dockerStartCmd": ["bash", "-c", START_CMD],
         "ports": [],
         "env": env,
     }
+    if gpu:
+        body.update({
+            "computeType": "GPU",
+            "gpuTypeIds": CHEAP_GPUS,
+            "gpuTypePriority": "availability",
+            "gpuCount": 1,
+            "minVCPUPerGPU": 4,
+            "minRAMPerGPU": 8,
+            "containerDiskInGb": 100,
+        })
+    else:
+        body.update({
+            "computeType": "CPU",
+            "cpuFlavorIds": ["cpu3c", "cpu3g", "cpu3m", "cpu5c", "cpu5g", "cpu5m"],
+            "cpuFlavorPriority": "custom",
+            "vcpuCount": vcpus,
+            # The 66 GB output plus pip and the index; the inputs are streamed
+            # from the Hub. The CPU disk cap is 10 GB per vCPU (80 at 8 vCPU),
+            # and a Pod volume is silently ignored, so this is all the disk there is.
+            "containerDiskInGb": 10 * vcpus,
+        })
     r = api("POST", "https://rest.runpod.io/v1/pods", body)
     if "err" in r:
         print("FAILED:", r)
         sys.exit(1)
-    print(f"POD {r.get('id')} name={r.get('name')} dc={r.get('dataCenterId')} cost/h={r.get('costPerHr')} status={r.get('desiredStatus')}")
+    print(f"POD {r.get('id')} name={r.get('name')} dc={r.get('dataCenterId')} gpu={r.get('gpu', {}).get('id') if isinstance(r.get('gpu'), dict) else r.get('gpuTypeId')} cost/h={r.get('costPerHr')} status={r.get('desiredStatus')}")
 
 
 def watch(pod_id: str, seconds: float):
@@ -223,7 +250,8 @@ def watch(pod_id: str, seconds: float):
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "create":
-        create(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 8)
+        size = sys.argv[3] if len(sys.argv) > 3 else "8"
+        create(sys.argv[2], 8 if size == "gpu" else int(size), gpu=size == "gpu")
     elif cmd == "watch":
         watch(sys.argv[2], float(sys.argv[3]) if len(sys.argv) > 3 else 60)
     else:
