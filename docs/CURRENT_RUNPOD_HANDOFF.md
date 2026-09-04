@@ -1,4 +1,4 @@
-# RunPod 链路交接记录（2026-09-03 更新）
+# RunPod 链路交接记录（2026-09-04 更新）
 
 ## 当前状态一句话
 
@@ -24,7 +24,15 @@ Railway `LTX_POD_ENABLED=1`；两条真实任务（480p/4 s 冷启动 74.6 s 全
 `fn6at7unxa` 已删，`RUNPOD_ENDPOINT_ID` 已从 Railway 删除并重部署（`ab664be1`，healthz 200）。RunPod 现在
 **没有任何 serverless endpoint**，只剩 Wan Pod 链路的两个卷 `3xl6dvrx0p`/`nv7g5aobqn`（140 GB ≈ $10/月，Wan 退役时一起删）。
 
-**下一步：第九节第 7 步 10Eros Max（核验结论与建议形态见第十七节末尾）。**
+**2026-09-04 第四轮（第十八节）：第 7 步 10Eros Max 上线并验收通过。** 先验掉了第十七节末尾的前提
+（`adaln_t_table[t] == basis @ (SiLU(te(t)) − mean)`，输出空间相对 RMS 0.13–0.29%，低于 bf16 步长），
+`workers/minimax-h3/restore_pruned_adaln.py` 在自删 Pod 上把 40 GB 的 curve 格式导出还原成 66 GB 全量 DiT
+（51 组 AdaLN、补 `time_embedder`、QKV 逐头布局），两半 LFS 存进私有仓库 `Andrew3453/10Eros-Max-h3-restored`
+（修订 `a1e652ba…`）。第四条链路 `minimax-h3-10eros` / `runpod_eros_pod`，模板 `eeaodpmboi`，
+Railway `EROS_ENABLED=1`，部署 `169d226a`；验收任务 768p/5 s 冷启动 564 s 提交到成片、推理 92 s、峰值显存 30 GB，抽帧真实画面。
+踩的坑（CPU Pod 盘上限、卷被丢、满盘 heredoc、容器重启循环、xet 上传必败）全记在第十八节。
+
+**下一步（可选）：10Eros 的步数/shift 做 A/B（模板 env 即可，不用重建镜像）；两条 H3 链路同时热着会双份空闲费，看用量决定 10Eros 的保温窗口。**
 
 ---
 
@@ -266,7 +274,7 @@ HF token 已在 Railway 变量里，权限够。
 5c. ~~用最新 SHA 的镜像建一个不带 `H3_EXTRA_SERVER_ARGS_JSON` 的模板验一次~~ ✅ 见第十三节
 5d. ~~web 端稳定创建任务：提交先入队、守卫循环申请 GPU~~ ✅ 提交 `79dec8f`，见第十三节
 6. ~~保温（拉取式 worker + 自动空闲超时）~~ ✅ 提交 `53d64ed`，见第十六节（部署/验收状态也在那）
-7. 10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力
+7. ~~10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力~~ ✅ 2026-09-04 第十八节：还原并验证、私有仓库 `Andrew3453/10Eros-Max-h3-restored`、第四条链路 `minimax-h3-10eros` 上线并抽帧验收
 8. ~~清理~~ ✅ 2026-09-04 用户跑 `scripts/runpod/cleanup_runpod.py --yes` 删了 5 个残留 endpoint 和
    6 个卷（760GB ≈ $53/月）；保留 LTX 生产 endpoint `aoma1602mogius` 及其卷 `fn6at7unxa`、
    Wan Pod 链路的 `3xl6dvrx0p`/`nv7g5aobqn`。Railway 上 `RUNPOD_WAN_ENDPOINT_ID`、
@@ -903,3 +911,115 @@ volume-free 链路先按顺序试偏好机房（每个机房 × 每张候选卡�
   每条链路一个 live Pod，避免同一 Pod 上换 66 GB 权重；`download_models.py` 需按模型 id 决定是否 regroup。
   还原本身用 CPU Pod（≥150 GB 盘：40 GB 输入 + 66 GB 输出）跑，上传到 `Andrew3453` 私有仓库。
 
+---
+
+## 十八、2026-09-04 第四轮：10Eros Max 离线还原 + 第四条 Pod 链路
+
+### 先把第十七节末尾那个前提验掉（零成本，本机）
+
+ComfyUI `comfy/ldm/minimax/model.py` 的 curve 格式定义（`use_adaln_curves`）：
+
+- 推理时**只用 `adaln_t_table`**：`pos = clamp(t,0,1) × 1024`，两行 lerp，得到 8 维坐标直接喂 `adaln_proj.linear`
+  （`apply_silu=False`，fp32）。`adaln_basis`/`adaln_mean` 推理时根本不读，只是给还原用的元数据。
+- 非 curve 格式：`adaln_proj.linear(SiLU(time_embedder(t)))`，`time_embedder` 是 256 维 sinusoid（cos 在前，t∈[0,1]）→ 5376 → SiLU → 2688。
+
+用官方 `time_embedder`（Range 读 shard 1，63 MB）算 `c(t)=SiLU(te(t))`，t=i/1024：
+
+| 检查 | 结果 |
+| --- | --- |
+| `basis @ basis.T − I` | 最大 0.003（正交，bf16 噪声） |
+| 官方 vs PinkCherry `time_embedder.*` 四个张量 | **逐字节相同**（微调不动它，10Eros 也没理由动） |
+| `basis @ (c(t) − mean)` vs `adaln_t_table[i]` | 逐分量最大偏差 0.014（表最大值 0.47），均值 0.0011；反向 t=1−i/1024 偏差 0.87，方向唯一 |
+| 换算到 AdaLN 输出空间（blocks.0/25/49、final_layer，全部 1025 个 t） | 相对均方误差 **0.13%–0.25%**，低于权重本身 bf16 舍入步长 0.39%；最差点在 t=0（≈1%） |
+| 最小二乘拟合"有效基"（拟合更好 100 倍） | 系数爆到 3.9e6，不可用；**按文档公式用存储基** |
+
+结论：`adaln_t_table[t] == basis @ (SiLU(te(t)) − mean)` 成立（到 bf16 精度），还原等价于在 ComfyUI 里跑 10Eros。
+
+### 还原工具（提交 `b2f04a9` + `c14a304`）
+
+- `workers/minimax-h3/restore_pruned_adaln.py`：纯 numpy 流式，一次一个张量。51 组 `adaln_proj`：
+  `full_W = pruned_W @ basis`（f32 算，bf16 RNE 落盘），`full_bias = pruned_bias − pruned_W @ (basis @ mean)`；
+  `time_embedder.*` 四个 F32 张量从官方 shard 1 拷；丢 `adaln_basis/mean/t_table`；`attn.qkv_proj.weight`
+  顺手按 `regroup_qkv.standard_to_grouped` 排成逐头布局（含 token_refiner，PinkCherry 同款验证过）；
+  `__metadata__` 保留原字段并记录还原公式/来源/QKV 布局。内置 `verify()`：在 1025 个 t 上比对
+  `full_W @ c(t) + full_b` 与 `pruned_W @ table[t] + pruned_b`，相对 RMS > 1% 直接拒绝；`--index` 比对键集合与官方 535 键一致。
+  输入支持 https URL（`RangeReader`，带重试的 HTTP Range，64 MB 一块）。
+- 测试 5 条（公式/regroup/字节对齐/时间嵌入器错配拒绝/bf16 RNE/远程分块读）；`numpy` 加进 dev 依赖。
+- `scripts/runpod/eros_restore_pod.py create <sha> [vcpus]` / `watch <pod> [s]`：在 CPU Pod 上跑。
+
+### CPU Pod 的坑（两次白跑，各约 $0.01）
+
+1. RunPod **CPU Pod 容器盘上限**：cpu3 系列 ≤ 80 GB，cpu5 系列 ≤ 120 GB（建 Pod 报 500 明说）。
+2. **`volumeInGb` 对 CPU Pod 静默丢弃**（创建成功，GET 回来 `volumeInGb: 0`），`/work` 只有容器盘。
+   40 GB 输入 + 66 GB 输出装不下 → 第一个 Pod 撑满盘秒退并自删（当时失败即删，没留日志）。
+3. 解法：输入不落盘，`RangeReader` 直接从 Hub 按字节段读；只写 66 GB 输出，80 GB 容器盘够用。
+   自删改成失败后先留 15 分钟窗口。启动命令只剩 `echo $RESTORE_RUN_SH | base64 -d | bash`，避免嵌套引号被 RunPod 弄坏。
+4. `python:3.12-slim` 没有 `free`（procps）；内存看 `/proc/meminfo`。
+5. **满盘时 bash heredoc 写不了临时文件**：第二个 Pod 的自删段是 heredoc 传给 python 的，根本没执行；容器退出后
+   RunPod **自动重启容器**（同一块盘），每 16 分钟循环一次一直计费，直到我手动 `pods.py delete`（分类器放行）。
+   自删改成 `python3 -c`，双 API（v1+v2）各试 6 轮；外层留 `/work/.attempted` 标记，重启后直接跳到自删。
+6. **hf_xet 上传 66 GB 单文件必失败**：两个 Pod（US-KS-2 CPU、US-IL-1 GPU）共 13 次尝试，全部
+   `TimeoutError: Timeout: Request error: error decoding response body, domain: no-url`，去掉 `HF_XET_HIGH_PERFORMANCE`
+   也一样，第三个 Pod（还原成功、校验通过）因此白跑约 $0.6。改走**经典 LFS**（`HF_HUB_DISABLE_XET=1`），LFS 单文件上限
+   50 GB，所以按字节切两半 `*.part1of2/*.part2of2`（`RangeFile(io.BufferedIOBase)` 直接流式读字节段，不占额外盘），
+   附 `*.parts.json` 清单；worker 下载两半后 `append_part` 原地追加拼回（峰值盘 1.5 个文件）。本地 12 MB 字节段自测 sha256 一致。
+7. CPU Pod 8/16 vCPU 常无货（vCPU 必须 2 的幂）；`create <sha> gpu` 用最便宜的 secure GPU（RTX 2000 Ada/A4000/…，≈$0.27/h）
+   只要它的 100 GB 盘。
+
+### 实际跑（第三个 Pod `bfy0wlo8lh31fw` 还原成功但上传失败；最终 Pod `d2bft6ruiua4ql`，cpu3c 8 vCPU，$0.24/h）
+
+| 步骤 | 实测 |
+| --- | --- |
+| 引导（pip numpy + huggingface_hub[hf_xet]、取脚本、下 index） | 约 1 分钟 |
+| 还原（输入 40.22 GB 经 HTTP Range 流式读，输出 66.28 GB 写盘） | **35 分钟**（约 33 MB/s，受 Hub Range 读限速；GPU Pod 上也一样） |
+| 内置校验（blocks.0 / blocks.49 / final_layer，1025 个 t） | 相对 RMS **0.288% / 0.244% / 0.262%**，键集合与官方 535 键一致 |
+| 上传（LFS，两半各 33,138,856,624 字节） | 第一半 10 分钟，第二半 9 分钟（中途 S3 一次 500，huggingface_hub 自动重试） |
+| 结果 | `Andrew3453/10Eros-Max-h3-restored` 修订 **`a1e652bae8a8064e825741c30123feec39075640`**：`beta4/…_sglang_bf16.safetensors.part1of2`/`.part2of2` + `.parts.json` |
+| 远端复核（本机 Range 读两半拼成一个文件） | 头 535 个张量形状正确、数据总长精确等于 66,277,713,248；跨边界的 `blocks.31.mlp.fc1.weight`、两个 norm、两个 `time_embedder` 偏置均与来源**逐字节相同** |
+| 成本 | 四个 Pod 合计约 **$1.1**（含撑盘、循环、xet 失败三次白跑；有效那次 $0.22） |
+
+### 第四条链路（提交 `e3ec4cf`）
+
+照第十七节"加一条链路"的模式，`runpod.py` 零改动：
+
+- 控制面：模型 id **`minimax-h3-10eros`**，provider **`runpod_eros_pod`**，`load_eros_pod_settings()` 读
+  `RUNPOD_EROS_POD_*`（默认与 H3 相同：volume-free、220 GB 盘、同卡），模型 pin 复用 `H3_MODEL_ID/VERSION`，
+  `EROS_WORKFLOW_VERSION=h3-fl2va-10eros-beta4-v1`，`EROS_NSFW_MODEL_ID/VERSION` 指向私有仓库
+  `Andrew3453/10Eros-Max-h3-restored`；`name_prefix=papa-eros`。**`EROS_ENABLED=1`** 才放行（独立于 `H3_ENABLED`）。
+  `H3_FAMILY = {pinkcherry, 10eros}`：768p 规则、拒参考图规则按家族走。
+- worker：`download_models.py` 按 `H3_NSFW_MODEL_ID` 选 profile（PinkCherry 下载后 regroup；10Eros 已是逐头布局不
+  regroup，放 `<root>/10eros/`，两半下载后 `append_part` 原地拼回，峰值盘 78 + 99 GB < 220），`H3_TURBO_LORA_ENABLED=0`
+  时不下 turbo LoRA。`handler.py` 零改动（所有旋钮本来就是 env）。
+- 模板：`scripts/runpod/eros_make_template.py <sha>`：H3 同一镜像，env 差异只有
+  `H3_NSFW_TRANSFORMER_PATH/MODEL_ID/MODEL_VERSION`、`H3_TURBO_LORA_ENABLED=0`、`H3_INFERENCE_STEPS=8`
+  （sglang 步数 = 去噪区间数 +1，作者说 6–8 步，取中间 7 个区间）、`H3_FLOW_SHIFT=12.0`/`H3_AUDIO_FLOW_SHIFT=3.0`
+  （作者没给 shift；他在 ComfyUI 里调的，ComfyUI H3 默认 `sigma_shift_video=12 / audio=3`；PinkCherry 链路的 6/3 是
+  turbo LoRA 的训练 shift，不带 LoRA 就不适用）、`H3_WORKFLOW_VERSION=h3-fl2va-10eros-beta4-v1`。
+- 前端：`modelNames`/`selfHostedModels` 加项，`H3_MODELS` 集合让 768p 默认与参考图置灰按家族走；`index.html`
+  `__EROS_OPTION_STATE__`。
+- 测试：137 全过。
+
+### 部署与验收（2026-09-04 13:19–13:37Z）
+
+模板 **`eeaodpmboi`**（镜像 `e3ec4cf8`，`eros_make_template.py`）→ Railway `EROS_ENABLED=1`、`RUNPOD_EROS_POD_TEMPLATE_ID=eeaodpmboi`、
+`RUNPOD_EROS_POD_CALLBACK_URL`、`RUNPOD_EROS_POD_KEEP_WARM_SECONDS=600`、`RUNPOD_EROS_POD_PREFERRED_DATA_CENTER_IDS=US-NC-1,US-NC-2,US-PA-1`、
+`RUNPOD_EROS_POD_ADDITIONAL_GPU_IDS`（同 H3）、`RUNPOD_EROS_POD_MAX_RUNTIME_SECONDS=1800`、`EROS_NSFW_MODEL_VERSION=a1e652ba…` →
+部署 **`169d226a`** SUCCESS，healthz 200，网页两个 H3 选项均可选。
+
+| | 任务 A `b398bee5`（768p/5 s，16:9，冷启动） | 任务 B `676dd001`（768p/8 s，A 成功后 4.5 分钟提交） |
+| --- | --- | --- |
+| 拿到 GPU | **5.0 s**，第 1 次申请即成功，Pod `fa7flskpu73jt9`，**US-NC-1** | 复用同一个 Pod（`pod_reused=true`） |
+| 下权重（78 GB 基座 + 两半 66 GB + 原地拼接）/ 加载 | **145 s** / 86 s | 0 / 0（提交后 **2 s** 已在 `video_start`） |
+| 推理（8 步，1344×768，120 帧 / 192 帧） | **92.3 s**（handler 全程 324 s） | **146.7 s**（192 帧；handler 全程 147.4 s） |
+| 提交 → 成片 | **564 s**（13:20:42 → 13:30:05Z） | **152 s**（13:34:32 → 13:37:04Z） |
+| 峰值显存 | **30,060 MB**（PinkCherry+turbo LoRA 同规格 59.4 GB；没有 LoRA 的 dynamic 项） | 33,322 MB |
+| 抽帧 | 红裙女子走在金色海滩、镜头推进、发丝随风，三帧全是真实画面；音频均值 −24.0 dB，峰值 −9.0 dB | 雪松林晨光中小跑的赤狐、呼出的白气可见，三帧全是真实画面；音频均值 −34.1 dB，峰值 −12.1 dB |
+
+抽帧脚本换成 `scripts/runpod/fetch_media.py <name> <video_url|uuid> [dir]`（自己登录、断点续传、抽帧、亮度/响度）。
+`h3_submit_and_follow.py` 的输出别再接 `| tail`：JSON 头部（含 `video_url`）会被截掉，改从 `/api/tasks` 取。
+
+### 留给下一步
+
+- 推理时间对比：同 768p/120 帧，PinkCherry+turbo LoRA 9 步 108 s，10Eros 8 步无 LoRA 92 s；192 帧 147 s（仍超线性）。
+- 10Eros 的 shift/步数只是"作者在 ComfyUI 的默认值"，没有做过 A/B；`H3_EXTRA_SERVER_ARGS_JSON` 和模板 env 都能调，不用重建镜像。
+- 第九节第 7 步"UI 两个能力"已完成；两条 H3 链路各自保温，同时热着会双份空闲费。
