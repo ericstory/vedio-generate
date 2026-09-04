@@ -2,17 +2,13 @@
 
 ## 当前状态一句话
 
-**H3 链路「链路通、画面废」：三次「成功」出片加用户网页提交的两条，画面全是同一张与提示词无关的噪点纹理。
-根因未定，H3 已在 UI 里禁用（`H3_ENABLED=0`）直到修好。** 第十四节是完整排查记录，
-第十三节的入队/守卫循环申请 GPU 是好的（三次都 5 秒内拿到 Pod），第十五节是本机网络结论。
+**H3 噪声问题已定位并修复（2026-09-04）：PinkCherry 的 QKV 融合权重是 [q_all,k_all,v_all] 标准布局，
+而 sglang 的 H3 加载器按原版的逐头分组布局 [q0,k0,v0,q1,…] 重排，头被打乱。**
+把 52 个 `attn.qkv_proj.weight` 原地置换成分组布局后（提交 `a53b0ac`），走生产同一路径出了真实画面。
+线上：`H3_ENABLED=1`，模板 `o9oadhcku0`（现役镜像 + 启动命令里先做置换，不用等镜像）；
+CI 正在构建 `a53b0ac` 镜像，构建完用 `mktemplate.py` 建常规模板替换掉。第十四节是完整排查记录。
 
-已排除：LoRA 键名匹配（208/266 层挂上）、LoRA alpha（配错了 16 倍，已修，但改对后仍是噪声）。
-已知：bf16 + 逐层卸载会在「Scheduler loop started」后挂死（两个 Pod 各 ≥15 分钟 / ≥1 小时无日志）。
-**下一个最值得做的实验：`H3_ATTENTION_BACKEND=torch_sdpa`（FP8 其余不变）**——H3 是 GQA
-（`num_query_groups`），Wan 不是；SageAttention 在 SM 12.0 上对 H3 的 GQA 打包 QKV 出 NaN
-是剩下最贴合「输出与 seed/提示词/LoRA 都无关」的解释。脚本已备好，见第十四节末尾。
-
-**下一步：第十四节「下一步」。**
+**下一步：第十四节「收尾」清单。**
 
 ---
 
@@ -577,7 +573,7 @@ Railway 部署 `a9e92219`（2026-09-02 23:57 PT）。浏览器里确认：任务
 
 ---
 
-## 十四、2026-09-03：三次「成功」出的全是噪声——排查记录（根因未定）
+## 十四、2026-09-03/04：三次「成功」出的全是噪声——根因是 PinkCherry 的 QKV 行布局
 
 **现象**：用户在网页上看第十次出片（768p/15 秒），画面是一张静止的棕灰色噪点纹理。
 把第八次（5 秒，海上日出）和第十次（15 秒，另一条提示词）的成片拉下来抽帧对比：
@@ -616,29 +612,42 @@ Railway 部署 `a9e92219`（2026-09-02 23:57 PT）。浏览器里确认：任务
 心跳包卡住近一小时（Pod 没新日志时流不关、`readline` 不超时），回来已过上限就删 Pod。
 脚本已改成按墙钟截断读取（scratchpad `diag_watch.py` / `diag_pod.py`）。
 
-**推理**：输出与 seed、提示词、时长、LoRA 强度全部无关，且 5 秒和 15 秒的噪声统计完全一样，
-说明送进 VAE 的潜变量是全零/NaN（VAE 解码零潜变量正是这种灰褐色细纹理）；音频同样。
-即 DiT 输出被整体毁掉。FP8 完成但出零，bf16 直接挂——两者共同点是 **sage_attn + 逐层卸载 + H3**。
-H3 的注意力是 GQA 打包 QKV（`num_query_groups`、`_reorder_grouped_qkv_to_qkv`），Wan 是 MHA；
-Wan 在同一批卡上 FP8 + sage 出片正常。所以 **SageAttention（SM 12.0 自编译）对 H3 的 GQA 路径**
-是现在最贴合所有现象的嫌疑；其次是逐层卸载与 FP8 的组合（官方文档只在 resident 档验证过 FP8）。
+**继续排查（2026-09-04，每个 Pod 约 $0.35，全部钉在 US-NC-1/NC-2，看护脚本已修）**：
 
-**已做的修复（正确但不够）**：
-- 提交 `9dbed39`：`worker_config.lora_metadata_alpha()` 从 safetensors 头读 alpha，handler 自动传
-  `lora_alpha`（`H3_TURBO_LORA_ALPHA` 仍可覆盖），结果元数据新增 `turbo_lora_alpha`；`H3_FLOW_SHIFT` 默认 6.0。
-  镜像还没重建；模板 `np5uig5uvg`（FP8）和 `e33gscwiq1`（bf16，**会挂死，别用**）用 env 显式给了 alpha 8 / shift 6。
-- Railway：`RUNPOD_H3_POD_TEMPLATE_ID=np5uig5uvg`，`H3_ENABLED=0`（部署 `baefb3bd`）。
-  H3 在下拉里禁用、提交返回 503，直到画面修好再打开。Wan/LTX 不受影响。
+| Pod | 单变量 | 结果 |
+| --- | --- | --- |
+| `hn2hd94o63h05h` | `H3_ATTENTION_BACKEND=torch_sdpa` | 噪声（推理 128 秒，只比 sage 慢 20 秒） |
+| `qrck99i4q7r02o` | DiT 常驻，只卸载 text_encoder/vae（FP8） | 噪声（加载 61 秒，没 OOM） |
+| `2wdqzj8sidkvbv` | **关掉 PinkCherry，用原版 transformer** | **真实的海上日出，音频正常** |
+| `yxq7i96753bnaa` | PinkCherry 放进 `FL2VA/transformer/` 走普通加载路径 | 噪声（加载路径不是问题） |
+| `ympc2lxaps8r59` | **PinkCherry 的 52 个 qkv_proj 原地置换成分组布局** | **真实画面，音频正常** |
 
-**下一步（新会话，按顺序，每步一个变量）**：
-1. `H3_ATTENTION_BACKEND=torch_sdpa`，其余同 `np5uig5uvg`。用 scratchpad 的
-   `DIAG_DCS="US-NC-1,US-NC-2" no_proxy='*' python3 diag_create.py '{"H3_ATTENTION_BACKEND":"torch_sdpa"}' sdpa`
-   建 Pod，再 `no_proxy='*' python3 diag_watch.py <pod> sdpa 3000` 看护（已修好读日志的阻塞）。
-   成片用 `ffmpeg -ss 2 -i x.mp4 -frames:v 1 f.png` 抽帧看，别只看回调状态。
-2. 若仍噪声：关 PinkCherry（`H3_NSFW_TRANSFORMER_ENABLED=0`、`INCLUDE_STOCK_TRANSFORMER=1`，多下 66 GB）。
-3. 若仍噪声：拿 sglang cookbook 的 2×5090 bf16 逐层卸载配方原样跑（不加 LoRA、不加 PinkCherry、
-   `--attention-backend` 用默认），先证明这个镜像在这张卡上能出任何一张正常画面。
-4. 修好后：把 `H3_ENABLED=1`、切模板、跑一次 web 提交并**抽帧验收**，再把 `e33gscwiq1` 删掉。
+**根因**：HTTP Range 读两份权重比对，键名、形状、dtype 完全一致，但
+`blocks.0.attn.qkv_proj.weight`（[21504, 5376] = 56 头 × 3 × 128）的第 128–255 行，
+PinkCherry 与原版**第 384–511 行**逐位相等（MAD 0.00000），与原版同位置差异 0.13。
+即原版是逐头分组 [q0,k0,v0,q1,k1,v1,…]，PinkCherry 是 [q_all,k_all,v_all]；
+token_refiner 的两个 qkv 同样；`mlp.fc1` 的 [gate;up] 顺序一致不用动；没有 qkv bias。
+sglang `MiniMaxH3Attention._install_qkv_weight_loader` 假定分组布局做重排，于是每个头拿到别人的 K/V，
+DiT 输出塌成常量，VAE 解码零潜变量就是那张灰褐纹理。
+早期抽样「统计量逐位一致」是因为只看了每个张量开头 37 行（q0），两种布局开头一样——**抽样要抽中间**。
+
+**修复**：`workers/minimax-h3/regroup_qkv.py`（纯 Python，行置换不改字节长度，原地改写，
+marker 文件防重复置换），`download_models.py` 下载完 PinkCherry 后调用；Dockerfile 复制该文件；
+测试用合成 safetensors 验证置换与幂等。提交 `a53b0ac`。
+不等镜像的过渡模板 `o9oadhcku0`：现役镜像 `5a869e1`，启动命令
+`download_models.py && base64 -d 出 regroup 脚本并执行 && smoke.py`（脚本在 env `REGROUP_B64`），
+其余 env 同 `np5uig5uvg`（alpha 8、shift 6）。
+
+**收尾清单**：
+1. CI 构建 `a53b0ac` 成功后：`python3 mktemplate.py <sha> regroup` 建常规模板，
+   Railway 切过去，跑一次 web 提交并**抽帧验收**。
+2. 删掉过渡/诊断模板：`o9oadhcku0`、`bxoc3ez134`、`vqnyih9ibx`（原版 transformer 应急）、
+   `e33gscwiq1`（bf16，会挂死）、`np5uig5uvg`、`jkrh512m3s`、`02hdqp64b1` 及更早的。
+3. 第九节 5b（常驻层数）和第 6 步（保温）继续。
+4. 出片验收永远抽帧看图：`ffmpeg -ss 2 -i x.mp4 -frames:v 1 f.png`。
+
+**没验的**：PinkCherry 的成片质量（只验了「不是噪声」）；15 秒长度在修复后的表现；
+bf16 + 逐层卸载为什么挂死（生产不用 bf16，先不追）。
 
 ## 十五、本机网络：系统代理 127.0.0.1:8080 时断时续，这才是「视频打开慢」的原因
 
