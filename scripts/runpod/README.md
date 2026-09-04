@@ -1,0 +1,15 @@
+# RunPod ops scripts (H3 lane)
+
+All of these read `RUNPOD_API_KEY`, the Railway host and the admin login from
+`railway variables --kv` at run time; nothing secret is stored here. Run them
+from anywhere, but with `no_proxy='*'` on a Mac that has a flaky system proxy,
+otherwise urllib hangs on 127.0.0.1:8080.
+
+| Script | What it does |
+| --- | --- |
+| `h3_make_template.py <sha> [suffix]` | Create a volume-free H3 Pod template for one GHCR image SHA. |
+| `h3_diag_create.py '<json env overrides>' <tag>` | Create one diagnostic Pod from the live template with env overrides (no callbacks). `DIAG_DCS=US-NC-1,US-NC-2` pins data centres. |
+| `h3_diag_watch.py <pod> <tag> [ceiling_s]` | Stream that Pod's log, print stage/LoRA/error lines, save the log, delete the Pod. The SSE log stream sends keep-alives forever, so reads are capped by wall time. |
+| `pods.py list|delete <id>…` | List or delete Pods. |
+| `h3_submit_and_follow.py [prompt] [seconds]` | Submit through the production API and follow the task to a terminal state. |
+| `fetch_and_inspect_video.sh <name> <media-uuid>` | Download a result with resume, then print luma/audio stats and write frames. **Always look at frames: a succeeded callback proved nothing on 2026-09-03.** |
