@@ -2,13 +2,14 @@
 
 ## 当前状态一句话
 
-**H3 噪声问题已定位并修复（2026-09-04）：PinkCherry 的 QKV 融合权重是 [q_all,k_all,v_all] 标准布局，
-而 sglang 的 H3 加载器按原版的逐头分组布局 [q0,k0,v0,q1,…] 重排，头被打乱。**
-把 52 个 `attn.qkv_proj.weight` 原地置换成分组布局后（提交 `a53b0ac`），走生产同一路径出了真实画面。
-线上：`H3_ENABLED=1`，模板 `o9oadhcku0`（现役镜像 + 启动命令里先做置换，不用等镜像）；
-CI 正在构建 `a53b0ac` 镜像，构建完用 `mktemplate.py` 建常规模板替换掉。第十四节是完整排查记录。
+**H3 主线（MiniMax H3 + PinkCherry）已真正出片（2026-09-04）。** 之前十次「成功」全是噪声，根因是
+PinkCherry 的 QKV 融合权重行布局与 sglang 加载器的假设不一致（第十四节）；修复 `a53b0ac` 在下载后原地置换。
+线上：`H3_ENABLED=1`，**现役模板 `4af0xgv6zs`**（镜像 `a53b0ac`，常规启动命令，alpha 8 / shift 6），
+部署 `2ef88320`。最后一次验收任务 `8cc52ce5` 走生产 API：拿 Pod 4.7 秒、推理 110.8 秒、峰值显存 45.6 GB，
+元数据 `turbo_lora_alpha=8`、`flow_shift=6.0`，抽帧是真实画面。
+留一个原版 transformer 的应急模板 `vqnyih9ibx`（无 PinkCherry）。运维脚本在 `scripts/runpod/`。
 
-**下一步：第十四节「收尾」清单。**
+**下一步：第九节 5b（常驻层数）、第 6 步（保温）、第 8 步剩余清理（卷、serverless endpoint）。**
 
 ---
 
@@ -638,13 +639,14 @@ marker 文件防重复置换），`download_models.py` 下载完 PinkCherry 后�
 `download_models.py && base64 -d 出 regroup 脚本并执行 && smoke.py`（脚本在 env `REGROUP_B64`），
 其余 env 同 `np5uig5uvg`（alpha 8、shift 6）。
 
-**收尾清单**：
-1. CI 构建 `a53b0ac` 成功后：`python3 mktemplate.py <sha> regroup` 建常规模板，
-   Railway 切过去，跑一次 web 提交并**抽帧验收**。
-2. 删掉过渡/诊断模板：`o9oadhcku0`、`bxoc3ez134`、`vqnyih9ibx`（原版 transformer 应急）、
-   `e33gscwiq1`（bf16，会挂死）、`np5uig5uvg`、`jkrh512m3s`、`02hdqp64b1` 及更早的。
-3. 第九节 5b（常驻层数）和第 6 步（保温）继续。
-4. 出片验收永远抽帧看图：`ffmpeg -ss 2 -i x.mp4 -frames:v 1 f.png`。
+**收尾（已完成 2026-09-04）**：
+1. ✅ CI 构建 `a53b0ac` 成功 → 模板 `4af0xgv6zs`（`scripts/runpod/h3_make_template.py`）→ Railway 切换（部署 `2ef88320`）
+   → 生产 API 验收任务 `8cc52ce5` 成功并抽帧确认。
+2. ✅ 删掉诊断/过渡模板 `bxoc3ez134`、`o9oadhcku0`、`e33gscwiq1`、`np5uig5uvg`、`jkrh512m3s`、`02hdqp64b1`
+   及更早的六个；保留 `vqnyih9ibx`（原版 transformer 应急）。
+3. ✅ 运维脚本收进 `scripts/runpod/`（建模板、诊断 Pod 建/看护、提交跟踪、拉片抽帧），见其 README。
+4. 待做：第九节 5b、第 6 步保温、第 8 步的卷与 serverless endpoint 清理。
+5. **出片验收永远抽帧看图**：`scripts/runpod/fetch_and_inspect_video.sh <name> <media-uuid>`。
 
 **没验的**：PinkCherry 的成片质量（只验了「不是噪声」）；15 秒长度在修复后的表现；
 bf16 + 逐层卸载为什么挂死（生产不用 bf16，先不追）。
