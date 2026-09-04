@@ -697,3 +697,104 @@ def test_bf16_round_trip_uses_round_to_nearest_even() -> None:
     assert back.tolist()[:3] == [1.0, 1.0, 1.015625]
     assert back[3] == -2.5
     assert abs(back[5] - 3.14159) < 2**-7
+
+
+def test_restore_streams_a_remote_input_by_byte_range(tmp_path: Path, monkeypatch) -> None:
+    """The CPU Pod cannot hold the input next to the output, so URLs are read by Range request."""
+    np = pytest.importorskip("numpy")
+    restore = _load_restore()
+    f32 = lambda values: np.ascontiguousarray(values, dtype=np.float32).tobytes()
+    basis = np.eye(2, 3, dtype=np.float32)
+    mean = np.zeros(3, dtype=np.float32)
+    te = {
+        "time_embedder.proj_in.weight": np.full((2, 2), 0.3, dtype=np.float32),
+        "time_embedder.proj_in.bias": np.zeros(2, dtype=np.float32),
+        "time_embedder.proj_out.weight": np.full((3, 2), 0.7, dtype=np.float32),
+        "time_embedder.proj_out.bias": np.zeros(3, dtype=np.float32),
+    }
+    curve = restore.time_embedding_curve(np.arange(4) / 3, {k: v.astype(np.float64) for k, v in te.items()})
+    pruned_w = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    pruned_path = tmp_path / "p.safetensors"
+    _typed_safetensors(
+        pruned_path,
+        {
+            "adaln_basis": ("F32", [2, 3], f32(basis)),
+            "adaln_mean": ("F32", [3], f32(mean)),
+            "adaln_t_table": ("F32", [4, 2], f32(((curve - mean) @ basis.T).astype(np.float32))),
+            "blocks.0.adaln_proj.linear.weight": ("F32", [2, 2], f32(pruned_w)),
+            "blocks.0.adaln_proj.linear.bias": ("F32", [2], f32(np.zeros(2))),
+            "blocks.0.mlp.fc1.weight": ("BF16", [4, 2], bytes(range(16))),
+        },
+    )
+    donor_path = tmp_path / "d.safetensors"
+    _typed_safetensors(donor_path, {key: ("F32", list(value.shape), f32(value)) for key, value in te.items()})
+    blobs = {"https://hub.example/pruned": pruned_path.read_bytes(), "https://hub.example/donor": donor_path.read_bytes()}
+    requests: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, data: bytes):
+            self.status = 206
+            self._data = data
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        rng = request.get_header("Range")
+        requests.append((request.full_url, rng))
+        start, end = (int(part) for part in rng.removeprefix("bytes=").split("-"))
+        return FakeResponse(blobs[request.full_url][start : end + 1])
+
+    monkeypatch.setattr(restore.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(restore, "COPY_CHUNK", 8)  # force the copy producer to page
+    output = tmp_path / "o.safetensors"
+    summary = restore.restore("https://hub.example/pruned", "https://hub.example/donor", output, regroup=False)
+    assert summary["tensors"] == 3 + 4
+    with output.open("rb") as handle:
+        header, base = restore.read_header(handle)
+        np.testing.assert_allclose(restore.load_tensor(handle, base, header["blocks.0.adaln_proj.linear.weight"]), pruned_w @ basis)
+        a, b = header["blocks.0.mlp.fc1.weight"]["data_offsets"]
+        handle.seek(base + a)
+        assert handle.read(b - a) == bytes(range(16))
+        assert header["__metadata__"]["adaln_restored_from"] == "pruned"
+    # The 16-byte tensor came down in two 8-byte pages, nothing was fetched whole.
+    assert any(rng.endswith("-%d" % (int(rng.split("=")[1].split("-")[0]) + 7)) for _, rng in requests if "pruned" in _)
+    assert all(int(rng.split("-")[1]) - int(rng.split("=")[1].split("-")[0]) < 4096 for _, rng in requests)
+    assert restore.verify("https://hub.example/pruned", "https://hub.example/donor", output, sample_keys=("blocks.0",), log=lambda _: None)["blocks.0"] < 1e-5
+
+
+def test_range_reader_retries_and_rejects_short_reads(monkeypatch) -> None:
+    restore = _load_restore()
+    calls = {"n": 0}
+
+    class Short:
+        status = 206
+
+        def read(self):
+            return b"ab"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def flaky(request, timeout=0):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise restore.urllib.error.URLError("reset")
+        return Short()
+
+    monkeypatch.setattr(restore.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(restore.time, "sleep", lambda seconds: None)
+    reader = restore.RangeReader("https://hub.example/x", retries=3)
+    reader.seek(10)
+    with pytest.raises(IOError, match="short range response"):
+        reader.read(4)
+    assert calls["n"] == 3 and reader.tell() == 10

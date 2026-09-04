@@ -38,12 +38,15 @@ output on a CPU Pod with a few GB of RAM.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import os
 import struct
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -65,7 +68,72 @@ TIME_EMBEDDER_KEYS = (
     "time_embedder.proj_out.bias",
 )
 ITEM_BYTES = {"BF16": 2, "F16": 2, "F32": 4}
-COPY_CHUNK = 256 * 1024 * 1024
+# Also the HTTP request size when the source is a URL: small enough that a
+# retry is cheap, large enough that the request count stays in the hundreds.
+COPY_CHUNK = 64 * 1024 * 1024
+
+
+class RangeReader:
+    """A read-only file over HTTP Range requests: seek/read/tell and nothing more.
+
+    RunPod's CPU Pods cap the container disk at 80 GB and silently drop the Pod
+    volume, which is not enough for a 40 GB input next to a 66 GB output. The
+    restorer only ever reads one tensor at a time, so the input can stay on the
+    Hub and be fetched by byte range as it goes (the Hub's CDN honours Range
+    across its redirect). Every request is retried; a short response is an error.
+    """
+
+    def __init__(self, url: str, *, retries: int = 6, timeout: float = 180.0) -> None:
+        self.url = url
+        self.retries = retries
+        self.timeout = timeout
+        self.position = 0
+        self.name = url.rsplit("/", 1)[-1]
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        if whence != os.SEEK_SET:
+            raise ValueError("RangeReader only supports absolute seeks")
+        self.position = offset
+        return offset
+
+    def tell(self) -> int:
+        return self.position
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            raise ValueError("RangeReader needs an explicit size")
+        if size == 0:
+            return b""
+        start, end = self.position, self.position + size - 1
+        last: Exception | None = None
+        for attempt in range(self.retries):
+            request = urllib.request.Request(
+                self.url, headers={"Range": f"bytes={start}-{end}", "User-Agent": "papa-restore/1.0"}
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    if response.status != 206:
+                        raise IOError(f"server ignored the Range header (HTTP {response.status})")
+                    data = response.read()
+                if len(data) != size:
+                    raise IOError(f"short range response: {len(data)} of {size} bytes")
+                self.position += size
+                return data
+            except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
+                last = exc
+                time.sleep(min(2**attempt, 30))
+        raise IOError(f"range read {start}-{end} of {self.url} failed after {self.retries} attempts: {last}")
+
+    def close(self) -> None:
+        return None
+
+
+def open_source(source: str | Path):
+    """A local path opens as a file; an http(s) URL as a RangeReader."""
+    text = str(source)
+    if text.startswith(("http://", "https://")):
+        return RangeReader(text)
+    return open(source, "rb")
 
 
 def read_header(handle) -> tuple[dict[str, Any], int]:
@@ -133,8 +201,8 @@ def _tensor_keys(header: dict[str, Any]) -> list[str]:
 
 
 def restore(
-    pruned_path: Path,
-    donor_path: Path,
+    pruned_path: str | Path,
+    donor_path: str | Path,
     output_path: Path,
     *,
     regroup: bool = True,
@@ -144,8 +212,8 @@ def restore(
     log: Callable[[str], None] = lambda line: print(line, flush=True),
 ) -> dict[str, Any]:
     """Write the restored checkpoint and return a summary of what was done."""
-    pruned = open(pruned_path, "rb")
-    donor = open(donor_path, "rb")
+    pruned = open_source(pruned_path)
+    donor = open_source(donor_path)
     try:
         header, base = read_header(pruned)
         donor_header, donor_base = read_header(donor)
@@ -253,10 +321,10 @@ def restore(
         metadata = {str(k_): str(v) for k_, v in (header.get("__metadata__") or {}).items()}
         metadata.update(
             {
-                "adaln_restored_from": pruned_path.name,
+                "adaln_restored_from": Path(str(pruned_path)).name,
                 "adaln_restoration": "full_W = pruned_W @ adaln_basis; full_bias = pruned_bias - full_W @ adaln_mean",
                 "adaln_basis_orthogonality": f"{orthogonality:.4g}",
-                "time_embedder_donor": donor_path.name,
+                "time_embedder_donor": Path(str(donor_path)).name,
                 "qkv_row_layout": "per_head" if regroup else "standard",
             }
         )
@@ -306,8 +374,8 @@ def restore(
 
 
 def verify(
-    pruned_path: Path,
-    donor_path: Path,
+    pruned_path: str | Path,
+    donor_path: str | Path,
     output_path: Path,
     *,
     sample_keys: tuple[str, ...] = ("blocks.0", "blocks.49", "final_layer"),
@@ -322,34 +390,39 @@ def verify(
     not built from this time embedder (wrong t convention, or an embedder the
     export retrained) and the file must not ship.
     """
-    with open(pruned_path, "rb") as pruned, open(donor_path, "rb") as donor, open(output_path, "rb") as restored:
-        header, base = read_header(pruned)
-        donor_header, donor_base = read_header(donor)
-        out_header, out_base = read_header(restored)
-        basis = load_tensor(pruned, base, header[BASIS_KEY]).astype(np.float64)
-        table = load_tensor(pruned, base, header[TABLE_KEY]).astype(np.float64)
-        te = {key: load_tensor(donor, donor_base, donor_header[key]).astype(np.float64) for key in TIME_EMBEDDER_KEYS}
-        grid = table.shape[0]
-        t = np.arange(grid, dtype=np.float64) / (grid - 1)
-        curve = time_embedding_curve(t, te)  # [grid, D]
-        results: dict[str, float] = {}
-        for prefix in sample_keys:
-            weight_key = prefix + ADALN_WEIGHT_SUFFIX
-            bias_key = prefix + ADALN_BIAS_SUFFIX
-            if weight_key not in header:
-                continue
-            pruned_w = load_tensor(pruned, base, header[weight_key]).astype(np.float64)
-            pruned_b = load_tensor(pruned, base, header[bias_key]).astype(np.float64)
-            full_w = load_tensor(restored, out_base, out_header[weight_key]).astype(np.float64)
-            full_b = load_tensor(restored, out_base, out_header[bias_key]).astype(np.float64)
-            reference = table @ pruned_w.T + pruned_b
-            ours = curve @ full_w.T + full_b
-            rms = float(np.sqrt(((ours - reference) ** 2).mean()) / np.sqrt((reference**2).mean()))
-            results[prefix] = rms
-            log(f"verify {prefix}: relative RMS vs table lookup = {rms:.4g}")
-            if rms > max_relative_rms:
-                raise ValueError(f"{prefix}: restored projection deviates {rms:.3%} RMS from the curve table")
-        return results
+    pruned, donor = open_source(pruned_path), open_source(donor_path)
+    try:
+        with open(output_path, "rb") as restored:
+            header, base = read_header(pruned)
+            donor_header, donor_base = read_header(donor)
+            out_header, out_base = read_header(restored)
+            basis = load_tensor(pruned, base, header[BASIS_KEY]).astype(np.float64)
+            table = load_tensor(pruned, base, header[TABLE_KEY]).astype(np.float64)
+            te = {key: load_tensor(donor, donor_base, donor_header[key]).astype(np.float64) for key in TIME_EMBEDDER_KEYS}
+            grid = table.shape[0]
+            t = np.arange(grid, dtype=np.float64) / (grid - 1)
+            curve = time_embedding_curve(t, te)  # [grid, D]
+            results: dict[str, float] = {}
+            for prefix in sample_keys:
+                weight_key = prefix + ADALN_WEIGHT_SUFFIX
+                bias_key = prefix + ADALN_BIAS_SUFFIX
+                if weight_key not in header:
+                    continue
+                pruned_w = load_tensor(pruned, base, header[weight_key]).astype(np.float64)
+                pruned_b = load_tensor(pruned, base, header[bias_key]).astype(np.float64)
+                full_w = load_tensor(restored, out_base, out_header[weight_key]).astype(np.float64)
+                full_b = load_tensor(restored, out_base, out_header[bias_key]).astype(np.float64)
+                reference = table @ pruned_w.T + pruned_b
+                ours = curve @ full_w.T + full_b
+                rms = float(np.sqrt(((ours - reference) ** 2).mean()) / np.sqrt((reference**2).mean()))
+                results[prefix] = rms
+                log(f"verify {prefix}: relative RMS vs table lookup = {rms:.4g}")
+                if rms > max_relative_rms:
+                    raise ValueError(f"{prefix}: restored projection deviates {rms:.3%} RMS from the curve table")
+            return results
+    finally:
+        pruned.close()
+        donor.close()
 
 
 def check_against_index(output_path: Path, index_path: Path) -> None:
@@ -367,8 +440,8 @@ def check_against_index(output_path: Path, index_path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--pruned", required=True, type=Path, help="curve-form export (10Eros Max beta4)")
-    parser.add_argument("--donor", required=True, type=Path, help="stock shard carrying time_embedder.*")
+    parser.add_argument("--pruned", required=True, help="curve-form export (10Eros Max beta4): local path or https URL")
+    parser.add_argument("--donor", required=True, help="stock shard carrying time_embedder.*: local path or https URL")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--index", type=Path, help="stock model.safetensors.index.json to compare the key set against")
     parser.add_argument("--no-regroup", action="store_true", help="keep [q_all, k_all, v_all] QKV rows")

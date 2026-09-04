@@ -1,5 +1,10 @@
 """Restore 10Eros Max's pruned AdaLN on a CPU Pod and publish the result to a private HF repo.
 
+RunPod CPU Pods cap the container disk at 80 GB (cpu3) / 120 GB (cpu5) and
+silently drop a Pod volume (volumeInGb comes back 0), so the 40 GB input never
+touches the disk: the restorer reads it from the Hub by HTTP Range and only the
+66 GB output is written locally before the upload.
+
 Usage:
   python3 eros_restore_pod.py create <git-sha> [vcpus]   # create the private repo if needed, launch the Pod
   python3 eros_restore_pod.py watch <pod-id> [seconds]   # print new container log lines for up to N seconds
@@ -33,13 +38,20 @@ TARGET_REPO = "Andrew3453/10Eros-Max-h3-restored"
 TARGET_FILE = "beta4/10Eros_Max_h3_TURBO-hybrid_beta4_sglang_bf16.safetensors"
 GITHUB_RAW = "https://raw.githubusercontent.com/ericstory/vedio-generate"
 
-# Runs inside python:3.12-slim. Every step prints a STAGE line the watcher can grep for.
+# Runs inside python:3.12-slim. The whole thing travels as one base64 blob in an
+# env var and the container start command is nothing but `... | base64 -d | bash`,
+# so no quoting survives RunPod's command handling to be mangled. Every step
+# prints a STAGE line the watcher can grep for. On failure the Pod waits 15
+# minutes before deleting itself so the log can still be read.
 RUN_SH = r"""
+echo "STAGE outer_start $(date -u +%FT%TZ) pod=${RUNPOD_POD_ID:-?}"
+cat > /inner.sh <<'INNER'
 set -euo pipefail
 export HF_HUB_DISABLE_TELEMETRY=1 HF_XET_HIGH_PERFORMANCE=1 PYTHONUNBUFFERED=1
 mkdir -p /work/in /work/out && cd /work
-echo "STAGE bootstrap $(date -u +%FT%TZ) vcpus=$(nproc) mem=$(free -g | awk '/Mem/{print $2}')G disk_free=$(df -BG /work | awk 'NR==2{print $4}')"
+echo "STAGE bootstrap $(date -u +%FT%TZ) vcpus=$(nproc) mem=$(awk '/MemTotal/{printf "%dG", $2/1048576}' /proc/meminfo) disk_free=$(df -BG /work | awk 'NR==2{print $4}')"
 pip install -q numpy "huggingface_hub[hf_xet]"
+echo "STAGE pip_done"
 python3 - <<'PY'
 import os, urllib.request
 raw = os.environ["PAPA_RAW_BASE"]
@@ -48,18 +60,18 @@ for name in ("restore_pruned_adaln.py", "regroup_qkv.py"):
 print("STAGE scripts_fetched", flush=True)
 from huggingface_hub import hf_hub_download
 e = os.environ
-for repo, rev, name in ((e["SOURCE_REPO"], e["SOURCE_REVISION"], e["SOURCE_FILE"]),
-                        (e["DONOR_REPO"], e["DONOR_REVISION"], e["DONOR_SHARD"]),
-                        (e["DONOR_REPO"], e["DONOR_REVISION"], e["DONOR_INDEX"])):
-    path = hf_hub_download(repo, name, revision=rev, local_dir="/work/in")
-    print("STAGE downloaded", name, os.path.getsize(path), flush=True)
+path = hf_hub_download(e["DONOR_REPO"], e["DONOR_INDEX"], revision=e["DONOR_REVISION"], local_dir="/work/in")
+print("STAGE downloaded", e["DONOR_INDEX"], os.path.getsize(path), flush=True)
 PY
+# Input and donor stay on the Hub: the restorer reads them by byte range.
 python3 /work/restore_pruned_adaln.py \
-  --pruned "/work/in/$SOURCE_FILE" --donor "/work/in/$DONOR_SHARD" --index "/work/in/$DONOR_INDEX" \
+  --pruned "https://huggingface.co/$SOURCE_REPO/resolve/$SOURCE_REVISION/$SOURCE_FILE" \
+  --donor "https://huggingface.co/$DONOR_REPO/resolve/$DONOR_REVISION/$DONOR_SHARD" \
+  --index "/work/in/$DONOR_INDEX" \
   --output "/work/out/$(basename "$TARGET_FILE")" \
   --metadata "source_repo=$SOURCE_REPO" --metadata "source_revision=$SOURCE_REVISION" --metadata "source_file=$SOURCE_FILE" \
   --metadata "donor_repo=$DONOR_REPO" --metadata "donor_revision=$DONOR_REVISION" --metadata "restored_by=papa $PAPA_GIT_SHA"
-echo "STAGE restored $(ls -l /work/out | tail -1)"
+echo "STAGE restored $(ls -l /work/out | tail -1) disk_free=$(df -BG /work | awk 'NR==2{print $4}')"
 rm -rf /work/in
 python3 - <<'PY'
 import os
@@ -72,15 +84,24 @@ print("STAGE uploaded", info.commit_url, flush=True)
 print("STAGE revision", api.model_info(os.environ["TARGET_REPO"]).sha, flush=True)
 PY
 echo "STAGE done $(date -u +%FT%TZ)"
+INNER
+timeout 18000 bash /inner.sh
+code=$?
+echo "STAGE exit code=$code $(date -u +%FT%TZ)"
+if [ "$code" -ne 0 ]; then echo "STAGE grace 900s before self-delete"; sleep 900; fi
+python3 - <<'PY'
+import os, urllib.request
+req = urllib.request.Request("https://rest.runpod.io/v1/pods/" + os.environ["RUNPOD_POD_ID"], method="DELETE",
+                             headers={"Authorization": "Bearer " + os.environ["RUNPOD_API_KEY"]})
+try:
+    print("STAGE self_delete", urllib.request.urlopen(req, timeout=60).status, flush=True)
+except Exception as exc:
+    print("STAGE self_delete_failed", exc, flush=True)
+PY
+sleep 60
 """
 
-# Outer shell: run the job under a timeout, then always delete this Pod.
-START_CMD = (
-    "echo \"$RESTORE_RUN_SH\" | base64 -d > /run.sh; "
-    "timeout 18000 bash /run.sh; code=$?; echo \"STAGE exit code=$code\"; "
-    "python3 -c \"import os,urllib.request;r=urllib.request.Request('https://rest.runpod.io/v1/pods/'+os.environ['RUNPOD_POD_ID'],method='DELETE',headers={'Authorization':'Bearer '+os.environ['RUNPOD_API_KEY']});print('STAGE self_delete',urllib.request.urlopen(r,timeout=60).status,flush=True)\" || echo 'STAGE self_delete failed'; "
-    "sleep 60"
-)
+START_CMD = "echo $RESTORE_RUN_SH | base64 -d | bash"
 
 
 def api(method, url, body=None, timeout=120):
@@ -121,8 +142,10 @@ def create(sha: str, vcpus: int):
         "cpuFlavorIds": ["cpu3c", "cpu3g", "cpu5c", "cpu5g"],
         "cpuFlavorPriority": "custom",
         "vcpuCount": vcpus,
-        # 40 GB input + 5 GB donor + 66 GB output; the input is removed before the upload.
-        "containerDiskInGb": 160,
+        # The 66 GB output plus pip and the index; the inputs are streamed from
+        # the Hub. 80 GB is the cpu3 ceiling (cpu5 allows 120), and a Pod
+        # volume is silently ignored for CPU Pods, so this is all the disk there is.
+        "containerDiskInGb": 80,
         "volumeInGb": 0,
         "imageName": "python:3.12-slim",
         "dockerStartCmd": ["bash", "-c", START_CMD],
