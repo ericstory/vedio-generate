@@ -705,6 +705,107 @@ def _capacity_error() -> RunPodError:
     return RunPodError(f"RunPod Pod API HTTP 400: {body}", status_code=400, error=body)
 
 
+def test_ltx_routes_to_the_pod_lane_only_when_flagged(tmp_path: Path, monkeypatch) -> None:
+    """Flag off keeps the serverless endpoint; flag on queues LTX like the other Pod lanes."""
+    calls: list[str] = []
+
+    class FakeServerless:
+        def create_text_video(self, **kwargs):
+            calls.append(kwargs["model"])
+            return {"id": "remote-ltx", "status": "queued", "content": {}, "error": None}
+
+    def serverless_factory():
+        yield FakeServerless()
+
+    def pod_factory(provider: str):
+        raise AssertionError(f"Pod lane {provider} must not be asked for a client during the request")
+
+    monkeypatch.setattr(web, "_runpod_client", serverless_factory)
+    monkeypatch.setattr(web, "_runpod_cost_guard_tick", lambda store, shutdown_if_idle: False)
+    base = replace(
+        web_settings(tmp_path), runpod_cost_guard_enabled=True, runpod_cost_guard_poll_seconds=3600,
+    )
+    form = {"prompt": "long-form fallback", "model": "pinkcherry-ltx-2.3-v1.8", "resolution": "480p", "duration": 12}
+
+    with TestClient(create_app(replace(base, ltx_pod_enabled=False))) as client:
+        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
+        response = client.post("/generate/api/tasks", data=form)
+        assert response.status_code == 201
+        task = response.json()["task"]
+        assert task["provider"] == "runpod"
+        assert task["provider_task_id"] == "remote-ltx"
+        assert calls == ["pinkcherry-ltx-2.3-v1.8"]
+
+    monkeypatch.setattr(web, "_provider_client", pod_factory)
+    with TestClient(create_app(replace(base, ltx_pod_enabled=True, database_path=tmp_path / "ltx-pod.db"))) as client:
+        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
+        response = client.post("/generate/api/tasks", data=form)
+        assert response.status_code == 201
+        task = response.json()["task"]
+        assert task["provider"] == "runpod_ltx_pod"
+        assert task["provider_task_id"] == ""
+        assert task["provider_metadata"]["progress"]["stage"] == "awaiting_gpu"
+        # The other lanes are untouched by the flag.
+        assert web._provider_for("minimax-h3-pinkcherry", replace(base, ltx_pod_enabled=True)) == "runpod_h3_pod"
+        assert web._provider_for("seedance-2.5", replace(base, ltx_pod_enabled=True)) == "seedance"
+
+
+def test_ltx_pod_callback_commits_result_and_deletes_billed_pod(tmp_path: Path, monkeypatch) -> None:
+    """The LTX lane shares the Pod contract end to end, including deletion on a one-shot worker."""
+    settings = replace(web_settings(tmp_path), video_upload_token="callback-token")
+    store = TaskStore(settings.database_path)
+    store.create(
+        {
+            "id": "local-ltx",
+            "provider": "runpod_ltx_pod",
+            "provider_task_id": "pod-ltx-1",
+            "prompt": "测试",
+            "model": "pinkcherry-ltx-2.3-v1.8",
+            "ratio": "16:9",
+            "resolution": "480p",
+            "duration": 12,
+            "has_reference": 0,
+            "status": "processing",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    deleted: list[str] = []
+
+    class FakePodClient:
+        settings = _pod_settings(ui_model_id="pinkcherry-ltx-2.3-v1.8", name_prefix="papa-ltx")
+
+        def delete_pod(self, pod_id: str):
+            deleted.append(pod_id)
+
+    def fake_pod_client():
+        yield FakePodClient()
+
+    monkeypatch.setattr(web, "_ltx_pod_client", fake_pod_client)
+    monkeypatch.setattr(web, "_runpod_cost_guard_tick", lambda store, shutdown_if_idle: False)
+    with TestClient(create_app(settings)) as client:
+        progress = client.post(
+            "/generate/api/internal/pod-progress/local-ltx",
+            headers={"Authorization": "Bearer callback-token"},
+            json={"stage": "model_download_done", "seconds": 61.0},
+        )
+        assert progress.status_code == 200
+        result = client.post(
+            "/generate/api/internal/pod-result/local-ltx",
+            headers={"Authorization": "Bearer callback-token"},
+            json={
+                "status": "succeeded",
+                "content": {"video_url": "/generate/media/ltx.mp4", "video_inference_seconds": 370.0},
+                "error": None,
+                "worker": {"pulls_jobs": False},
+            },
+        )
+        assert result.status_code == 200
+    task = store.get("local-ltx")
+    assert task and task["status"] == "succeeded"
+    assert task["video_url"] == "/generate/media/ltx.mp4"
+    assert deleted == ["pod-ltx-1"]
+
+
 def test_pod_task_is_queued_without_touching_the_provider(tmp_path: Path, monkeypatch) -> None:
     """With the guard loop running, submitting returns before any Pod exists."""
     def provider_must_not_be_called(provider: str):

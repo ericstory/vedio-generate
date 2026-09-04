@@ -27,8 +27,13 @@ SELF_HOSTED_MODELS = frozenset({
     "wan-2.2-a14b-adult-v2",
     "minimax-h3-pinkcherry",
 })
+LTX_MODEL = "pinkcherry-ltx-2.3-v1.8"
+# LTX's static default is still the serverless endpoint so historical rows and
+# an un-flagged deployment keep working; with LTX_POD_ENABLED=1 the web app
+# routes new LTX tasks to LTX_POD_PROVIDER instead (see web._provider_for).
+LTX_POD_PROVIDER = "runpod_ltx_pod"
 SELF_HOSTED_PROVIDERS = {
-    "pinkcherry-ltx-2.3-v1.8": "runpod",
+    LTX_MODEL: "runpod",
     "wan-2.2-a14b-adult-v2": "runpod_wan_pod",
     "minimax-h3-pinkcherry": "runpod_h3_pod",
 }
@@ -37,7 +42,7 @@ SELF_HOSTED_PROVIDERS = {
 # a worker that pulls jobs keeps it warm through an idle window, a one-shot
 # worker (or any failure) has the billed Pod deleted as soon as the terminal
 # callback commits.
-POD_PROVIDERS = frozenset({"runpod_wan_pod", "runpod_h3_pod"})
+POD_PROVIDERS = frozenset({"runpod_wan_pod", "runpod_h3_pod", LTX_POD_PROVIDER})
 SEEDANCE_MODELS = frozenset(SUPPORTED_MODELS) - SELF_HOSTED_MODELS
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "expired"})

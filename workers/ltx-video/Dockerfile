@@ -44,6 +44,7 @@ WORKDIR /app
 COPY handler.py /app/handler.py
 COPY smoke.py /app/smoke.py
 COPY worker_config.py /app/worker_config.py
+COPY download_models.py /app/download_models.py
 COPY download_models.sh /app/download_models.sh
 RUN chmod 0755 /app/download_models.sh
 CMD ["python", "/app/handler.py"]

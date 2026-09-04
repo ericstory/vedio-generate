@@ -364,3 +364,77 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
             "H3_NSFW_MODEL_VERSION", "bf2fef11d0e55e957f4af997e3beade3362f44b3"
         ),
     )
+
+
+def load_ltx_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettings:
+    """Load the LTX 2.3 fallback lane on the same on-demand Pod shape as H3.
+
+    This replaces the H100 serverless endpoint (about $4.79/h effective once the
+    ~49% serverless surcharge is counted) with the $2.09/h RTX PRO 6000 Pod the
+    other two lanes already run on. The model pins deliberately reuse the
+    serverless SELF_HOSTED_* variables so both paths describe the same weights.
+    """
+    _load_dotenv(Path(env_file) if env_file else PROJECT_ROOT / ".env")
+    use_management_api_v1 = os.getenv("RUNPOD_API_V1", "0") == "1"
+    return RunPodPodSettings(
+        api_key=_required("RUNPOD_API_KEY"),
+        template_id=_required("RUNPOD_LTX_POD_TEMPLATE_ID"),
+        # Empty by default: volume-free like H3, the worker pulls ~79 GB to
+        # container disk at start and the Pod may land in any data centre.
+        network_volume_id=os.getenv("RUNPOD_LTX_POD_NETWORK_VOLUME_ID", "").strip(),
+        callback_url=_required("RUNPOD_LTX_POD_CALLBACK_URL"),
+        callback_token=_required("VIDEO_UPLOAD_TOKEN"),
+        api_base_url=os.getenv(
+            "RUNPOD_MANAGEMENT_API_BASE_URL",
+            "https://rest.runpod.io/v1" if use_management_api_v1 else "https://api.runpod.io/v2",  # rp-migrate: keep-v1
+        ).rstrip("/"),
+        use_management_api_v1=use_management_api_v1,
+        gpu_id=os.getenv(
+            "RUNPOD_LTX_POD_GPU_ID",
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        ),
+        additional_gpu_ids=_parse_gpu_ids("RUNPOD_LTX_POD_ADDITIONAL_GPU_IDS"),
+        data_center_id=os.getenv("RUNPOD_LTX_POD_DATA_CENTER_ID", "US-NC-2"),
+        fallback_data_center_id=os.getenv("RUNPOD_LTX_POD_FALLBACK_DATA_CENTER_ID", ""),
+        fallback_network_volume_id=os.getenv(
+            "RUNPOD_LTX_POD_FALLBACK_NETWORK_VOLUME_ID", ""
+        ),
+        additional_region_volumes=_parse_region_volumes(
+            "RUNPOD_LTX_POD_ADDITIONAL_REGION_VOLUMES"
+        ),
+        maximum_price_per_hour=float(
+            os.getenv("RUNPOD_LTX_POD_MAX_PRICE_PER_HOUR", "3.0")
+        ),
+        maximum_runtime_seconds=int(
+            os.getenv("RUNPOD_LTX_POD_MAX_RUNTIME_SECONDS", "1800")
+        ),
+        acquire_timeout_seconds=float(
+            os.getenv("RUNPOD_LTX_POD_ACQUIRE_TIMEOUT_SECONDS", "900")
+        ),
+        acquire_retry_seconds=float(
+            os.getenv("RUNPOD_LTX_POD_ACQUIRE_RETRY_SECONDS", "20")
+        ),
+        keep_warm_idle_seconds=float(os.getenv("RUNPOD_LTX_POD_KEEP_WARM_SECONDS", "0")),
+        max_pod_lifetime_seconds=float(
+            os.getenv("RUNPOD_LTX_POD_MAX_LIFETIME_SECONDS", "14400")
+        ),
+        # 79 GB of weights (46 GB PinkCherry, 24 GB Gemma, 8.6 GB LTX extras)
+        # plus the image and scratch space.
+        container_disk_gb=int(os.getenv("RUNPOD_LTX_POD_CONTAINER_DISK_GB", "120")),
+        model_id=os.getenv("SELF_HOSTED_MODEL_ID", "SexGod1979/PinkCherry_NSFW_LTX23"),
+        model_version=os.getenv(
+            "SELF_HOSTED_MODEL_VERSION", "PinkCherry_FineTune_bf16_v1_8_LTX23"
+        ),
+        workflow_version=os.getenv(
+            "SELF_HOSTED_WORKFLOW_VERSION", "pinkcherry-native-two-stage-v1"
+        ),
+        ui_model_id="pinkcherry-ltx-2.3-v1.8",
+        name_prefix="papa-ltx",
+        # PinkCherry LTX is the whole checkpoint, not an adapter or a swapped
+        # transformer, so neither adult pin applies and the job carries none.
+        adult_adapter_id="",
+        adult_adapter_version="",
+        adult_adapter_strength=1.0,
+        adult_model_id="",
+        adult_model_version="",
+    )

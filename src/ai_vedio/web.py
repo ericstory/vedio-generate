@@ -22,6 +22,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 
 from .capabilities import (
+    LTX_MODEL,
+    LTX_POD_PROVIDER,
     POD_PROVIDERS,
     SELF_HOSTED_MODELS,
     SELF_HOSTED_PROVIDERS,
@@ -33,6 +35,7 @@ from .config import (
     load_runpod_settings,
     load_settings,
     load_h3_pod_settings,
+    load_ltx_pod_settings,
     load_wan_pod_settings,
     load_wan_runpod_settings,
 )
@@ -81,6 +84,9 @@ class WebSettings:
     runpod_cost_guard_poll_seconds: float = 8.0
     wan_v2_enabled: bool = False
     h3_enabled: bool = False
+    # Route new LTX tasks to the on-demand Pod lane instead of the serverless
+    # endpoint. Off keeps the legacy serverless path for a clean rollback.
+    ltx_pod_enabled: bool = False
 
 
 def load_web_settings() -> WebSettings:
@@ -119,6 +125,7 @@ def load_web_settings() -> WebSettings:
         ),
         wan_v2_enabled=os.getenv("WAN_V2_ENABLED", "0") == "1",
         h3_enabled=os.getenv("H3_ENABLED", "0") == "1",
+        ltx_pod_enabled=os.getenv("LTX_POD_ENABLED", "0") == "1",
     )
 
 
@@ -625,20 +632,43 @@ def _h3_pod_client() -> Iterator[RunPodPodClient]:
         client.close()
 
 
+def _ltx_pod_client() -> Iterator[RunPodPodClient]:
+    client = RunPodPodClient(load_ltx_pod_settings())
+    try:
+        yield client
+    finally:
+        client.close()
+
+
 # Wrapped rather than bound directly so the lookup resolves the module
 # attribute at call time, which keeps the factories patchable in tests.
 POD_CLIENT_FACTORIES = {
     "runpod_wan_pod": lambda: _wan_pod_client(),
     "runpod_h3_pod": lambda: _h3_pod_client(),
+    LTX_POD_PROVIDER: lambda: _ltx_pod_client(),
 }
 POD_TEMPLATE_ENV_VARS = {
     "runpod_wan_pod": "RUNPOD_WAN_POD_TEMPLATE_ID",
     "runpod_h3_pod": "RUNPOD_H3_POD_TEMPLATE_ID",
+    LTX_POD_PROVIDER: "RUNPOD_LTX_POD_TEMPLATE_ID",
 }
 POD_TIMEOUT_LABELS = {
     "runpod_wan_pod": "Wan",
     "runpod_h3_pod": "MiniMax H3",
+    LTX_POD_PROVIDER: "LTX",
 }
+
+
+def _provider_for(model: str, settings: WebSettings) -> str:
+    """Which backend a new task for this model goes to.
+
+    LTX is the one model with two backends: the legacy serverless endpoint and
+    the on-demand Pod lane. The flag decides for new tasks only; rows already
+    stored keep the provider they were created with.
+    """
+    if model == LTX_MODEL and settings.ltx_pod_enabled:
+        return LTX_POD_PROVIDER
+    return SELF_HOSTED_PROVIDERS.get(model, "seedance")
 
 
 def _provider_client(provider: str) -> Iterator[SeedanceClient | RunPodClient | RunPodPodClient]:
@@ -977,12 +1007,18 @@ def _sweep_orphan_pods(store: TaskStore, *, provider: str, client: RunPodPodClie
 
 
 def _runpod_cost_guard_tick(store: TaskStore, *, shutdown_if_idle: bool) -> bool:
-    ltx_active = _runpod_provider_cost_guard_tick(
-        store,
-        provider="runpod",
-        client_factory=_runpod_client,
-        shutdown_if_idle=shutdown_if_idle,
-    )
+    ltx_active = False
+    # Once LTX has moved to its Pod lane the serverless endpoint is deleted and
+    # this variable with it; polling a missing endpoint every tick is noise.
+    # Tasks still stored against the endpoint keep being polled regardless, so
+    # an in-flight serverless job is not orphaned by flipping the lane.
+    if os.getenv("RUNPOD_ENDPOINT_ID", "").strip() or store.active_runpod("runpod"):
+        ltx_active = _runpod_provider_cost_guard_tick(
+            store,
+            provider="runpod",
+            client_factory=_runpod_client,
+            shutdown_if_idle=shutdown_if_idle,
+        )
     wan_active = False
     if os.getenv("RUNPOD_WAN_ENDPOINT_ID", "").strip():
         wan_active = _runpod_provider_cost_guard_tick(
@@ -1380,7 +1416,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="视频参数不受支持")
         is_self_hosted = model in SELF_HOSTED_MODELS
         store: TaskStore = request.app.state.store
-        provider = SELF_HOSTED_PROVIDERS.get(model, "seedance")
+        provider = _provider_for(model, settings)
         if is_self_hosted:
             unfinished = store.active_runpod(provider)
             if provider in POD_PROVIDERS and settings.runpod_cost_guard_enabled:
@@ -1413,7 +1449,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=422, detail="H3 文生视频首版暂不接收参考图"
                 )
-        if model == "pinkcherry-ltx-2.3-v1.8" and reference and reference.filename:
+        if model == LTX_MODEL and reference and reference.filename:
             raise HTTPException(status_code=422, detail="自建模型首版暂不支持参考图")
         if model == "wan-2.2-a14b-adult-v2":
             if not settings.wan_v2_enabled:

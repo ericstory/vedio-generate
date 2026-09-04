@@ -14,7 +14,11 @@ PinkCherry 的 QKV 融合权重行布局与 sglang 加载器的假设不一致�
 第 8 步的卷与 serverless endpoint 清理做成了 `scripts/runpod/cleanup_runpod.py`（dry-run 默认），
 **待用户执行 `--yes`**（自动模式的分类器不允许 Claude 自己删）。
 
-**下一步：第十六节末尾的「待办」。**
+**2026-09-04 第三轮（第十七节）**：第 9 步「LTX 迁 Pod 链路」代码就位（控制面第三条 Pod 链路 + LTX worker
+拉活/回调/开机下载），124 个测试全过，**待 CI 出镜像 → 建模板 → Railway 开 `LTX_POD_ENABLED=1` → 真实出片抽帧**；
+第 7 步 10Eros Max 做完零成本核验（QKV 布局同 PinkCherry、缺 time_embedder、还原公式），未动手还原。
+
+**下一步：第十七节的「部署与验收步骤」。**
 
 ---
 
@@ -261,7 +265,8 @@ HF token 已在 Railway 变量里，权限够。
    6 个卷（760GB ≈ $53/月）；保留 LTX 生产 endpoint `aoma1602mogius` 及其卷 `fn6at7unxa`、
    Wan Pod 链路的 `3xl6dvrx0p`/`nv7g5aobqn`。Railway 上 `RUNPOD_WAN_ENDPOINT_ID`、
    `RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID` 两个变量指向已删资源，删法见第十六节待办。
-9. V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）
+9. V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）——
+   **代码就位（第十七节），待部署验收**
 
 ---
 
@@ -768,5 +773,83 @@ RunPod 运行中 Pod 归零。Pod 总寿命约 25.5 分钟 ≈ $0.89，其中空
    `railway variable delete RUNPOD_WAN_ENDPOINT_ID` → `railway variable delete RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID`
    → `railway up --detach`。变量删不删都不影响功能：守卫只会对着不存在的 Wan endpoint 多报几次被吞掉的 404。
 2. 删上一版模板 `4af0xgv6zs`（保温模板已验过）。
-3. 第九节第 7 步（10Eros Max）、第 9 步（LTX 迁 Pod 链路，迁完才能删 `fn6at7unxa` 和 `aoma1602mogius`）。
+3. ~~第 9 步（LTX 迁 Pod 链路）~~ 代码就位，部署验收见第十七节；第 7 步（10Eros Max）核验结论也在第十七节。
 4. 可选：模板里 `H3_SECONDS_PER_MPIXEL_STEP=0.13` 让 15 秒的投影准一点（只影响显示，不影响守卫判断）。
+
+## 十七、2026-09-04 第三轮：LTX 迁 Pod 链路（代码就位，待部署验收）；10Eros Max 零成本核验
+
+### LTX Pod 链路：改了什么
+
+Pod 链路的机制（申请、保温、拉活、回调、孤儿清扫、运行上限）本来就按 provider 参数化，
+所以加第三条链路是「一个配置加载器 + 一个客户端工厂 + 几处字典项」，`runpod.py` 零改动：
+
+- **控制面**：provider `runpod_ltx_pod`；`load_ltx_pod_settings()` 读 `RUNPOD_LTX_POD_*`
+  （默认 volume-free、容器盘 120 GB、GPU 同 H3、模型 pin 复用 `SELF_HOSTED_MODEL_ID/VERSION/WORKFLOW_VERSION`，
+  `ui_model_id` 仍是 `pinkcherry-ltx-2.3-v1.8`，`name_prefix=papa-ltx`，无 adult pin）；
+  `_ltx_pod_client`、`POD_CLIENT_FACTORIES`/`POD_TEMPLATE_ENV_VARS`/`POD_TIMEOUT_LABELS` 加项，`POD_PROVIDERS` 加项。
+  **`LTX_POD_ENABLED=1`** 时 `_provider_for()` 把**新**LTX 任务路由到 Pod 链路，关掉仍走 serverless（回滚即关开关）；
+  已落库的行保持各自 provider。serverless 守卫 tick 改为「`RUNPOD_ENDPOINT_ID` 还在，或库里还有 in-flight 的
+  serverless 任务」才跑，删掉变量后不再每 8 秒对着不存在的 endpoint 报错。
+- **worker（`workers/ltx-video/`）**：`smoke.py` 换成 H3 同款（tee 日志、回调重试、`worker.pulls_jobs`、
+  `pull_jobs` 拉活、永不自行退出）；`handler.py` 加 `_progress`（同一套阶段名，前端文案全有）、
+  `assert_gpu_healthy`（下载前探 GPU）、`ensure_models`（无卷时 `MODEL_ROOT=/models/PinkCherry-LTX-2.3-v1.8`，
+  `LTX_DOWNLOAD_ON_START=1` 调 `download_models.py`）、分段计时（`model_load/model_download/upload_seconds`）、
+  `peak_memory_mb`、`inference_steps`。`download_models.py` 用 `snapshot_download` 按 `models.lock.json` 的
+  revision 拉 4 个仓库（Gemma gated，靠 `HF_TOKEN`）；`download_models.sh` 退化为薄包装；Dockerfile 多 COPY 一个文件。
+  LTX 镜像基座里 transformers 依赖 huggingface_hub，不需要额外安装（H3 那个 `[cli]` 升级坑不会重演）。
+- CI：`ltx-worker.yml` 按路径触发，无需改；镜像 `ghcr.io/ericstory/papa-ltx-video:<sha>`。
+- 脚本：`scripts/runpod/ltx_make_template.py <sha>`（模板 env 同 serverless 的 LTX 旋钮 + 上传/HF token，
+  `args` 是 `smoke.py`，盘 120 GB，带 GHCR 凭据）；`h3_submit_and_follow.py` 支持 `MODEL=… RESOLUTION=…`；
+  `cleanup_runpod.py --ltx-serverless` 才会把 `aoma1602mogius` / `fn6at7unxa` 纳入删除。
+- 前端：无改动（LTX 早在 `selfHostedModels`，阶段文案齐全）。
+- 测试：124 全过（新增 8：配置加载器、开关路由、LTX Pod 回调删 Pod、worker 阶段顺序/开机下载 pin 一致、
+  smoke 拉活/自报 pulls_jobs/失败带日志尾）。
+
+### 部署与验收步骤（下一会话按顺序做）
+
+1. 等 GitHub Actions `ltx-worker.yml` 对本提交构建成功（公开仓库列 runs 不需要 token；LTX 镜像有 GHA 层缓存，
+   通常比 H3 的 14 分钟快）。
+2. `no_proxy='*' python3 scripts/runpod/ltx_make_template.py <full-sha>` → 记下模板 id。
+3. Railway（在仓库目录）：
+   `railway variable set LTX_POD_ENABLED=1 RUNPOD_LTX_POD_TEMPLATE_ID=<id> RUNPOD_LTX_POD_CALLBACK_URL=https://<RAILWAY_PUBLIC_DOMAIN>/generate/api/internal/pod-result RUNPOD_LTX_POD_KEEP_WARM_SECONDS=600 --skip-deploys`
+   → `railway up --detach` → healthz 200。（保温窗口沿用 H3 的 600 秒；LTX 是兜底链路，若嫌空闲费可设 300 或 0。）
+4. `MODEL=pinkcherry-ltx-2.3-v1.8 RESOLUTION=480p no_proxy='*' python3 scripts/runpod/h3_submit_and_follow.py "<prompt>" 4`
+   → 成功后 **必须抽帧**：`scripts/runpod/fetch_and_inspect_video.sh <name> <media-uuid>`。
+   预期：拿 Pod 秒级；拉镜像 1–2.5 分钟；下 79 GB 约 1–2 分钟；加载 + 4 s/480p 推理约 6 分钟
+   （A/B 记录 370 s 含加载、含 Gemma 编码）；Pod 约 $0.3。
+5. 验收通过后（用户自跑，分类器不让 Claude 删）：
+   `python3 scripts/runpod/cleanup_runpod.py --ltx-serverless`（dry-run 看清单）→ 加 `--yes` 删 endpoint
+   `aoma1602mogius` 与卷 `fn6at7unxa`（≈$7/月，最后一个 serverless endpoint）→
+   `railway variable delete RUNPOD_ENDPOINT_ID` → `railway up --detach`。
+6. 可选：`RUNPOD_LTX_POD_ADDITIONAL_GPU_IDS` 加 PRO 6000 Workstation（96 GB，同 SM 12.0）；
+   48 GB 卡需要 `LTX_OFFLOAD=cpu`，不建议列入。
+
+### 已知风险
+
+- **Gemma 是 gated 仓库**：模板里的 `HF_TOKEN`（`Andrew3453`）必须已接受 `google/gemma-3-12b-it-qat-q4_0-unquantized`
+  的条款；当初灌 serverless 卷时是否用的同一账户没有记录。若 `model_download_start` 后失败回调里是 403/GatedRepo，
+  去 HF 网页接受条款即可，不用改代码。
+- LTX handler **没有**运行时长预算守卫（H3 有 `validate_runtime_budget`）：15 s/720p 在 PRO 6000 上没测过，
+  只有 `RUNPOD_LTX_POD_MAX_RUNTIME_SECONDS=1800` 兜底；H100 serverless 实测 10.4 分钟，应在预算内。
+- worker 的 `EAGER_LOAD_MODELS` 对 `smoke.py` 入口无意义（只在 `handler.py` 作为主程序时生效），模板里设 0 只是为了明确。
+
+### 10Eros Max（第九节第 7 步）零成本核验结论
+
+对 `TenStrip/10Eros-Max` 的 `10Eros_Max_h3_TURBO-hybrid_beta4.safetensors`（40.22 GB，534 张量）做 HTTP Range 读取：
+
+- **QKV 布局与 PinkCherry 相同**：`blocks.0.attn.qkv_proj.weight` 第 128–255 行与官方第 384–511 行 MAD 0.0016
+  （与官方同位置 0.12），即 [q_all,k_all,v_all]，**`regroup_qkv.py` 直接复用**。
+- **缺 `time_embedder.proj_in/proj_out` 四个张量**（官方 535 个，它 534 个：少 4 个 time_embedder，多
+  `adaln_basis[8,2688]`、`adaln_mean[2688]`、`adaln_t_table[1025,8]`），还原时要从官方权重补回 time_embedder。
+- 被裁的不止 50 个 block：`final_layer.adaln_proj.linear.weight` 也是 [10752, 8]，共 **51 组**按
+  `full_W = pruned_W @ basis`、`full_bias = pruned_bias − full_W @ mean` 还原，产物 ≈ 66 GB。
+- 还原「精确等价于 ComfyUI 里跑 10Eros」的唯一前提是 `adaln_t_table[t] == basis @ (SiLU(time_embedder(t)) − mean)`，
+  这是 ComfyUI 裁剪格式的定义方式（第八节已验 basis 正交）；动手前值得读一遍 ComfyUI 的 H3 模型代码确认
+  t_table 的定义（本机没有 `gh`，GitHub 代码搜索需要 token）。
+- 作者 README：beta4 用 **euler/simple 6–8 步**，turbo 已烤进权重（**不加 turbo LoRA**）；shift 未给。
+  `h3_graft_methodology.md` 只讲 graft，不讲 AdaLN 裁剪。
+- 建议形态：做成**第四条 Pod 链路**（照搬本节「加一条链路」的模式：新 provider + 模板 env 切
+  `H3_NSFW_MODEL_ID`/`H3_NSFW_TRANSFORMER_PATH`、`H3_TURBO_LORA_ENABLED=0`、`H3_INFERENCE_STEPS=7`），
+  每条链路一个 live Pod，避免同一 Pod 上换 66 GB 权重；`download_models.py` 需按模型 id 决定是否 regroup。
+  还原本身用 CPU Pod（≥150 GB 盘：40 GB 输入 + 66 GB 输出）跑，上传到 `Andrew3453` 私有仓库。
+

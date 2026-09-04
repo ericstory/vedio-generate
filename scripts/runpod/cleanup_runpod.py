@@ -54,6 +54,14 @@ KEEP_VOLUMES = {
     V.get("RUNPOD_WAN_POD_NETWORK_VOLUME_ID", "").strip(),
     V.get("RUNPOD_WAN_POD_FALLBACK_NETWORK_VOLUME_ID", "").strip(),
 } - {""}
+# Handoff step 9: once the LTX Pod lane (LTX_POD_ENABLED=1) has produced a real
+# video, the serverless endpoint and its volume are the last legacy resources.
+# Opt in explicitly; the default run still protects them.
+if "--ltx-serverless" in sys.argv:
+    ENDPOINTS["aoma1602mogius"] = "papa LTX serverless production (LTX moved to the Pod lane)"
+    VOLUMES["fn6at7unxa"] = "LTX weights in US-NE-1 100GB (Pod lane is volume-free)"
+    KEEP_ENDPOINTS -= {"aoma1602mogius", V.get("RUNPOD_ENDPOINT_ID", "").strip()}
+    KEEP_VOLUMES -= {"fn6at7unxa"}
 
 
 def api(method, path):
@@ -105,6 +113,8 @@ def main() -> int:
         print("Now on Railway (one key per command, then redeploy):")
         print("  railway variable delete RUNPOD_WAN_ENDPOINT_ID")
         print("  railway variable delete RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID")
+        if "--ltx-serverless" in sys.argv:
+            print("  railway variable delete RUNPOD_ENDPOINT_ID")
         print("  railway up --detach")
     else:
         print("dry run only; re-run with --yes to delete")

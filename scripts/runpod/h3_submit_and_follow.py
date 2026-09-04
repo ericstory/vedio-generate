@@ -4,7 +4,7 @@ Since the queued-acquisition change the request returns as soon as the task is
 stored; the control plane's guard loop then asks RunPod for a Pod every ~20 s
 for up to 15 minutes, so there is nothing to retry from here.
 """
-import json,sys,time,urllib.request,urllib.error,subprocess,http.cookiejar
+import json,os,sys,time,urllib.request,urllib.error,subprocess,http.cookiejar
 APP="/Users/macmini/workspace/papa/apps/video-generator"
 V=dict(l.split("=",1) for l in subprocess.run(["railway","variables","--kv"],capture_output=True,text=True,cwd=APP).stdout.splitlines() if "=" in l)
 HOST=V["RAILWAY_PUBLIC_DOMAIN"].strip()
@@ -29,7 +29,9 @@ def login():
 login()
 fields={
     "prompt": sys.argv[1] if len(sys.argv)>1 else "A calm sunrise over the ocean, gentle waves rolling toward the shore, warm golden light, cinematic wide shot",
-    "model":"minimax-h3-pinkcherry","ratio":"16:9","resolution":"768p","duration":sys.argv[2] if len(sys.argv)>2 else "5","generate_audio":"true",
+    # MODEL=pinkcherry-ltx-2.3-v1.8 RESOLUTION=480p follows the LTX Pod lane instead.
+    "model":os.environ.get("MODEL","minimax-h3-pinkcherry"),"ratio":os.environ.get("RATIO","16:9"),
+    "resolution":os.environ.get("RESOLUTION","768p"),"duration":sys.argv[2] if len(sys.argv)>2 else "5","generate_audio":"true",
 }
 t0=time.time(); r=post_form("/api/tasks",fields); dt=time.time()-t0
 if "err" in r: print("SUBMIT FAILED:",r); sys.exit(1)

@@ -2,6 +2,24 @@
 
 独立于 Seedance 的自建云 GPU 链路。Worker 使用 Lightricks 官方 Python pipeline，生成结果上传到 R2/S3；模型权重不进入镜像和 Git。
 
+## 按需 Pod 链路（2026-09-04 起的主形态）
+
+镜像不变，启动命令换成 `python /app/smoke.py`（模板 `args`），Worker 的行为与 MiniMax H3 完全一致：
+
+- 首个任务来自控制面注入的 `SMOKE_INPUT_JSON`，结果回调 `POD_RESULT_CALLBACK_URL`，
+  阶段回调 `POD_PROGRESS_CALLBACK_URL`（`gpu_probe → model_download_* → model_load_* → video_* → upload_start → complete`）；
+- **volume-free**：没有 `/runpod-volume` 时权重根目录是 `/models/PinkCherry-LTX-2.3-v1.8`，
+  `download_models.py` 用 `snapshot_download` 按 `models.lock.json` 的 revision 拉 79 GB 到容器盘
+  （`LTX_DOWNLOAD_ON_START=1`，模板 env 需带能读取 gated Gemma 的 `HF_TOKEN`），容器盘 120 GB；
+- 成功后若控制面注入了 `POD_JOBS_BASE_URL`（保温开启），Worker 每 5 秒向
+  `/api/internal/pod-jobs/{RUNPOD_POD_ID}/next` 拉下一个任务；失败或被回收则停止并等控制面删除；
+- 失败回调带 `/tmp/ltx-worker.log` 尾部 3000 字符。
+
+控制面侧：`LTX_POD_ENABLED=1` + `RUNPOD_LTX_POD_*` 变量（见仓库 `.env.example`），模板用
+`scripts/runpod/ltx_make_template.py <sha>` 创建。下面的 Serverless 说明保留给回滚。
+
+## Serverless（旧形态，保留给回滚）
+
 ## 模型准备
 
 在 RunPod Network Volume 的 `/runpod-volume/models/PinkCherry-LTX-2.3-v1.8` 准备：
