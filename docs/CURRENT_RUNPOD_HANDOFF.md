@@ -20,7 +20,11 @@ Railway `LTX_POD_ENABLED=1`；两条真实任务（480p/4 s 冷启动 74.6 s 全
 （`RUNPOD_<LANE>_POD_PREFERRED_DATA_CENTER_IDS`，H3/LTX 都设 `US-NC-1,US-NC-2,US-PA-1`）。
 第 7 步 10Eros Max 做完零成本核验，未动手还原。
 
-**下一步：用户自跑第十七节末尾的清理（删 LTX serverless endpoint 与卷），然后第 7 步 10Eros Max。**
+**2026-09-04 08:25Z 收尾完成**：用户已跑 `cleanup_runpod.py --ltx-serverless --yes`，endpoint `aoma1602mogius` 与卷
+`fn6at7unxa` 已删，`RUNPOD_ENDPOINT_ID` 已从 Railway 删除并重部署（`ab664be1`，healthz 200）。RunPod 现在
+**没有任何 serverless endpoint**，只剩 Wan Pod 链路的两个卷 `3xl6dvrx0p`/`nv7g5aobqn`（140 GB ≈ $10/月，Wan 退役时一起删）。
+
+**下一步：第九节第 7 步 10Eros Max（核验结论与建议形态见第十七节末尾）。**
 
 ---
 
@@ -95,9 +99,9 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 
 **当前运行中 Pod：0。** 所有临时/探测 Pod 均已删除。
 
-**存储现状（2026-09-04 清理后）**：只剩 3 个卷 240GB ≈ $17/月——LTX 生产卷 `fn6at7unxa`（US-NE-1 100GB）、
-Wan Pod 链路 `3xl6dvrx0p`（US-KS-2 70GB）与 `nv7g5aobqn`（US-NC-2 70GB）；serverless endpoint 只剩 LTX 生产的
-`aoma1602mogius`。Wan 那两个卷等 Wan 链路退役时一起删，LTX 那个等第九节第 9 步。
+**存储现状（2026-09-04 08:25Z 第二次清理后）**：只剩 Wan Pod 链路的 2 个卷 140GB ≈ $10/月——
+`3xl6dvrx0p`（US-KS-2 70GB）与 `nv7g5aobqn`（US-NC-2 70GB），等 Wan 链路退役时一起删；
+**serverless endpoint 已全部删除**（LTX 生产的 `aoma1602mogius` 随第 9 步一起退役）。
 
 ---
 
@@ -873,12 +877,11 @@ volume-free 链路先按顺序试偏好机房（每个机房 × 每张候选卡�
 
 **成本**：第一次卡在 EUR-IS-2 的 Pod 约 $2.09 白烧；第二个 Pod A+B+保温窗口约 20 分钟 ≈ $0.70。
 
-### 收尾（用户自跑，分类器不让 Claude 删）
+### 收尾 ✅（2026-09-04 08:25Z，用户自跑）
 
-1. `no_proxy='*' python3 scripts/runpod/cleanup_runpod.py --ltx-serverless`（dry-run 看清单）
-   → 加 `--yes` 删 endpoint `aoma1602mogius` 与卷 `fn6at7unxa`（≈$7/月，最后一个 serverless endpoint）。
-2. `railway variable delete RUNPOD_ENDPOINT_ID` → `railway up --detach`（删不删都不影响功能，守卫已按变量存在与否决定是否轮询）。
-3. 之后 `.env.example` 顶部的 serverless LTX 块可以整段删掉，`RunPodClient`（serverless）只剩历史行会用到。
+1. ✅ `cleanup_runpod.py --ltx-serverless --yes`：endpoint `aoma1602mogius` 与卷 `fn6at7unxa` 已删，剩余卷 140 GB / 2 个（Wan），endpoint 0 个。
+2. ✅ `railway variable delete RUNPOD_ENDPOINT_ID` → `railway up --detach`（部署 `ab664be1`，healthz 200）。
+3. 可选：`.env.example` 顶部的 serverless LTX 块可以整段删掉，`RunPodClient`（serverless）只剩历史行会用到。
 
 ### 10Eros Max（第九节第 7 步）零成本核验结论
 
