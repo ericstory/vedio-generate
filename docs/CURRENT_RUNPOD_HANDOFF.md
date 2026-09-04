@@ -833,6 +833,24 @@ Pod 链路的机制（申请、保温、拉活、回调、孤儿清扫、运行�
   只有 `RUNPOD_LTX_POD_MAX_RUNTIME_SECONDS=1800` 兜底；H100 serverless 实测 10.4 分钟，应在预算内。
 - worker 的 `EAGER_LOAD_MODELS` 对 `smoke.py` 入口无意义（只在 `handler.py` 作为主程序时生效），模板里设 0 只是为了明确。
 
+### 部署实录（2026-09-04 06:57Z 起）与第一个坑：EUR-IS-2 拉镜像超过一小时
+
+CI 构建 `35ce3e0` 成功（21 分钟）→ 模板 **`cbj3cbaipw`**（`ltx_make_template.py`）→ Railway
+`LTX_POD_ENABLED=1`、`RUNPOD_LTX_POD_TEMPLATE_ID=cbj3cbaipw`、`RUNPOD_LTX_POD_CALLBACK_URL`、
+`RUNPOD_LTX_POD_KEEP_WARM_SECONDS=600` → 部署 `57a68375` SUCCESS。预检：HF token 能读 gated Gemma（匿名 401）。
+
+第一次提交（任务 `5ebf28f2`，480p/4 s）：入队 0.81 s，守卫 12 s 内拿到 Pod `letsxfx1hvez6t`，
+**落在 EUR-IS-2**。之后 50 分钟停在 `pod_created`：RunPod 系统日志一直是
+`create container: still fetching image …`（各层 `Downloading`），容器始终没起来，所以连 `gpu_probe` 都没有。
+镜像只有 **8.75 GB**（比 H3 的 14 GB 小），是这个机房到 GHCR 的链路问题。期间把
+`RUNPOD_LTX_POD_MAX_RUNTIME_SECONDS` 提到 3600（部署 `3fdd9768`）想给它机会，没用，最终由运行上限收掉。
+
+**修法（本次提交）**：`RunPodPodSettings.preferred_data_center_ids` + `RUNPOD_<LANE>_POD_PREFERRED_DATA_CENTER_IDS`：
+volume-free 链路先按顺序试偏好机房（每个机房 × 每张候选卡各一次 POST），全部容量拒绝后才落到「任意机房」。
+生产值 `US-NC-1,US-NC-2,US-PA-1`（H3 十几次出片都在这几处，NC-1 拉 14 GB 约 1 分钟），H3 与 LTX 两条链路都设。
+**留给下一步的想法**：更精细的守卫是「`pod_created` 后 N 分钟没有 `gpu_probe` 就删 Pod 换机器」，
+比运行上限便宜得多；LTX 的运行上限暂留 3600（长视频链路，卡死最多白烧 $2）。
+
 ### 10Eros Max（第九节第 7 步）零成本核验结论
 
 对 `TenStrip/10Eros-Max` 的 `10Eros_Max_h3_TURBO-hybrid_beta4.safetensors`（40.22 GB，534 张量）做 HTTP Range 读取：

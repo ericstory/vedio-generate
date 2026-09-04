@@ -606,6 +606,51 @@ def test_volume_free_lane_drops_the_data_centre_pin(monkeypatch) -> None:
     client.close()
 
 
+def test_volume_free_lane_tries_preferred_data_centres_before_anywhere(monkeypatch) -> None:
+    """Placement order: each preferred data centre, then no pin at all."""
+    from ai_vedio.config import RunPodPodSettings
+    from ai_vedio.runpod import RunPodPodClient
+
+    settings = RunPodPodSettings(
+        api_key="k",
+        template_id="tpl",
+        network_volume_id="",
+        callback_url="https://host.example/generate/api/internal/pod-result",
+        callback_token="t",
+        gpu_id="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        preferred_data_center_ids=("US-NC-1", "US-NC-2"),
+        capacity_retry_sweeps=1,
+        capacity_retry_delay_seconds=0,
+        ui_model_id="pinkcherry-ltx-2.3-v1.8",
+    )
+    client = RunPodPodClient(settings)
+    bodies: list[dict] = []
+    accept_from = {"attempt": 3}
+
+    def fake_request(method, path, **kwargs):
+        if method == "GET":
+            return {"env": {}}
+        body = kwargs["json"]
+        bodies.append(body)
+        if len(bodies) < accept_from["attempt"]:
+            raise _capacity_error()
+        return {"id": f"pod-{len(bodies)}", "cost": 2.09, "gpu": {"id": body["gpu"]["id"]}}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    result = client.create_text_video(prompt="p", model="pinkcherry-ltx-2.3-v1.8", task_id="task-1")
+    assert result["id"] == "pod-3"
+    assert [body.get("dataCenterIds") for body in bodies] == [["US-NC-1"], ["US-NC-2"], None]
+    assert all("mounts" not in body for body in bodies)
+
+    # A preferred data centre with stock wins immediately.
+    bodies.clear()
+    accept_from["attempt"] = 1
+    result = client.create_text_video(prompt="p", model="pinkcherry-ltx-2.3-v1.8", task_id="task-2")
+    assert result["id"] == "pod-1"
+    assert [body.get("dataCenterIds") for body in bodies] == [["US-NC-1"]]
+    client.close()
+
+
 def test_pod_caller_can_ask_for_a_single_capacity_sweep(monkeypatch) -> None:
     """The guard loop retries on its own cadence, so each pass sweeps once."""
     from ai_vedio.config import RunPodPodSettings

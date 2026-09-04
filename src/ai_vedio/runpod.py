@@ -393,7 +393,12 @@ class RunPodPodClient:
         # and "the two data centres our volumes happen to live in" -- and on
         # 2026-09-01 those two had zero suitable cards for hours.
         if not self.settings.network_volume_id:
-            lanes: list[tuple[str, str]] = [("", "")]
+            # Volume-free: the preferred data centres first (fast, known image
+            # pulls), then anywhere at all. The first LTX Pod landed in
+            # EUR-IS-2 and spent over an hour fetching an 8.75 GB image.
+            lanes: list[tuple[str, str]] = [
+                (dc, "") for dc in self.settings.preferred_data_center_ids
+            ] + [("", "")]
         else:
             lanes = [(self.settings.data_center_id, self.settings.network_volume_id)]
         if (

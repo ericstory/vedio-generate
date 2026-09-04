@@ -82,6 +82,12 @@ class RunPodPodSettings:
     fallback_data_center_id: str = ""
     fallback_network_volume_id: str = ""
     additional_region_volumes: tuple[tuple[str, str], ...] = ()
+    # Volume-free lanes only: data centres to try first, in order, before
+    # asking for a Pod anywhere. Image pulls from GHCR differ by more than an
+    # order of magnitude between data centres (about a minute in US-NC-1, over
+    # an hour in EUR-IS-2 on 2026-09-04), so "anywhere" is the last resort,
+    # not the first choice. Ignored while a network volume pins the lane.
+    preferred_data_center_ids: tuple[str, ...] = ()
     volume_mount_path: str = "/runpod-volume"
     # Big enough to hold the weights when network_volume_id is empty and the
     # worker pulls them to container disk instead.
@@ -197,13 +203,18 @@ def load_wan_runpod_settings(env_file: str | Path | None = None) -> RunPodSettin
     )
 
 
-def _parse_gpu_ids(env_name: str) -> tuple[str, ...]:
-    """Decode the ordered fallback GPU list (newline- or comma-separated)."""
+def _parse_id_list(env_name: str) -> tuple[str, ...]:
+    """Decode an ordered id list (newline- or comma-separated)."""
     raw = os.getenv(env_name, "").strip()
     if not raw:
         return ()
     parts = [part.strip() for chunk in raw.split("\n") for part in chunk.split(",")]
     return tuple(part for part in parts if part)
+
+
+def _parse_gpu_ids(env_name: str) -> tuple[str, ...]:
+    """Decode the ordered fallback GPU list (newline- or comma-separated)."""
+    return _parse_id_list(env_name)
 
 
 def _parse_region_volumes(env_name: str) -> tuple[tuple[str, str], ...]:
@@ -326,6 +337,7 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
         additional_region_volumes=_parse_region_volumes(
             "RUNPOD_H3_POD_ADDITIONAL_REGION_VOLUMES"
         ),
+        preferred_data_center_ids=_parse_id_list("RUNPOD_H3_POD_PREFERRED_DATA_CENTER_IDS"),
         maximum_price_per_hour=float(
             os.getenv("RUNPOD_H3_POD_MAX_PRICE_PER_HOUR", "3.0")
         ),
@@ -402,6 +414,7 @@ def load_ltx_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
         additional_region_volumes=_parse_region_volumes(
             "RUNPOD_LTX_POD_ADDITIONAL_REGION_VOLUMES"
         ),
+        preferred_data_center_ids=_parse_id_list("RUNPOD_LTX_POD_PREFERRED_DATA_CENTER_IDS"),
         maximum_price_per_hour=float(
             os.getenv("RUNPOD_LTX_POD_MAX_PRICE_PER_HOUR", "3.0")
         ),
