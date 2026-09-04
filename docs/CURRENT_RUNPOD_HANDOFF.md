@@ -79,8 +79,7 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 
 | 资源 | ID | 备注 |
 | --- | --- | --- |
-| H3 卷（主） | `n7meo4oft2` | US-NC-2 170GB，已灌满 145,443,261,098 字节 |
-| H3 卷（备） | `qextiwmyla` | US-KS-2 170GB，已灌满 145,443,261,107 字节 |
+| H3 卷 | ~~`n7meo4oft2` `qextiwmyla`~~ | **2026-09-04 已删**（H3 volume-free），见第十六节 |
 | **H3 模板（现役）** | `w9e1krvelc` | volume-free，`53d64ed` 镜像（保温 worker），220GB 容器盘，无 env 覆盖，`H3_SECONDS_PER_MPIXEL_STEP=0.1` |
 | H3 模板（上一版） | `4af0xgv6zs` | `a53b0ac` 镜像（一次性 worker），`w9e1krvelc` 验过后可删 |
 | H3 模板（应急） | `vqnyih9ibx` | 原版 transformer（无 PinkCherry），`5a869e1` 镜像 |
@@ -90,8 +89,9 @@ UI 下拉里 H3 可选且排第一。相关变量已全部设置，含 `HF_TOKEN
 
 **当前运行中 Pod：0。** 所有临时/探测 Pod 均已删除。
 
-⚠️ **9 个卷 / 1000GB ≈ $70/月，7×24 计费。** 其中 6 个（760GB）无人引用，删法见第九节第 8 步
-（`scripts/runpod/cleanup_runpod.py`）；上表的两个 H3 卷都在待删名单里。
+**存储现状（2026-09-04 清理后）**：只剩 3 个卷 240GB ≈ $17/月——LTX 生产卷 `fn6at7unxa`（US-NE-1 100GB）、
+Wan Pod 链路 `3xl6dvrx0p`（US-KS-2 70GB）与 `nv7g5aobqn`（US-NC-2 70GB）；serverless endpoint 只剩 LTX 生产的
+`aoma1602mogius`。Wan 那两个卷等 Wan 链路退役时一起删，LTX 那个等第九节第 9 步。
 
 ---
 
@@ -257,11 +257,10 @@ HF token 已在 Railway 变量里，权限够。
 5d. ~~web 端稳定创建任务：提交先入队、守卫循环申请 GPU~~ ✅ 提交 `79dec8f`，见第十三节
 6. ~~保温（拉取式 worker + 自动空闲超时）~~ ✅ 提交 `53d64ed`，见第十六节（部署/验收状态也在那）
 7. 10Eros Max AdaLN 离线还原 → 私有仓库 → UI 两个能力
-8. 清理：~~闲置 H3 模板~~ ✅（第十四节收尾）；**卷与 serverless endpoint 待用户跑
-   `python3 scripts/runpod/cleanup_runpod.py --yes`**（先不带 `--yes` 看 dry-run）。脚本删 5 个残留
-   endpoint 和 6 个无人引用的卷（760GB ≈ $53/月），保留 LTX 生产 endpoint `aoma1602mogius` 及其卷
-   `fn6at7unxa`、Wan Pod 链路的 `3xl6dvrx0p`/`nv7g5aobqn`（Railway 变量还在用）。
-   删完再 `railway variable delete RUNPOD_WAN_ENDPOINT_ID RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID`。
+8. ~~清理~~ ✅ 2026-09-04 用户跑 `scripts/runpod/cleanup_runpod.py --yes` 删了 5 个残留 endpoint 和
+   6 个卷（760GB ≈ $53/月）；保留 LTX 生产 endpoint `aoma1602mogius` 及其卷 `fn6at7unxa`、
+   Wan Pod 链路的 `3xl6dvrx0p`/`nv7g5aobqn`。Railway 上 `RUNPOD_WAN_ENDPOINT_ID`、
+   `RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID` 两个变量指向已删资源，删法见第十六节待办。
 9. V1 LTX 从 serverless 迁到按需 Pod（单价 $4.79/h → $2.09/h，且免掉 49% 附加费）
 
 ---
@@ -764,9 +763,10 @@ RunPod 运行中 Pod 归零。Pod 总寿命约 25.5 分钟 ≈ $0.89，其中空
 `projected_denoise_seconds` 对 15 秒仍低估（334 vs 428），常数 0.1 → 0.13 的修正要重建模板，未动。
 
 **待办**（按顺序）：
-1. 用户执行 `python3 scripts/runpod/cleanup_runpod.py`（看清单）→ `--yes`；然后
-   `railway variable delete RUNPOD_WAN_ENDPOINT_ID RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID`
-   再 `railway up --detach`（delete 会触发一次重部署，`up` 覆盖即可）。
+1. ~~清理 RunPod 卷与 endpoint~~ ✅ 用户已跑 `cleanup_runpod.py --yes`。剩 Railway 两个变量
+   （`railway variable delete` **一次只接一个 KEY**；自动模式的分类器不让 Claude 跑 delete，用户自己跑）：
+   `railway variable delete RUNPOD_WAN_ENDPOINT_ID` → `railway variable delete RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID`
+   → `railway up --detach`。变量删不删都不影响功能：守卫只会对着不存在的 Wan endpoint 多报几次被吞掉的 404。
 2. 删上一版模板 `4af0xgv6zs`（保温模板已验过）。
 3. 第九节第 7 步（10Eros Max）、第 9 步（LTX 迁 Pod 链路，迁完才能删 `fn6at7unxa` 和 `aoma1602mogius`）。
 4. 可选：模板里 `H3_SECONDS_PER_MPIXEL_STEP=0.13` 让 15 秒的投影准一点（只影响显示，不影响守卫判断）。

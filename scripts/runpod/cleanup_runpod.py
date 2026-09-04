@@ -102,7 +102,10 @@ def main() -> int:
         left = api("GET", "/networkvolumes")
         print(f"remaining volumes: {sum(v.get('size', 0) for v in left)} GB across {len(left)}; "
               f"remaining endpoints: {[e['id'] for e in api('GET', '/endpoints')]}")
-        print("Now on Railway: railway variable delete RUNPOD_WAN_ENDPOINT_ID RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID")
+        print("Now on Railway (one key per command, then redeploy):")
+        print("  railway variable delete RUNPOD_WAN_ENDPOINT_ID")
+        print("  railway variable delete RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID")
+        print("  railway up --detach")
     else:
         print("dry run only; re-run with --yes to delete")
     return 0
