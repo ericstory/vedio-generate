@@ -32,7 +32,7 @@ Railway `LTX_POD_ENABLED=1`；两条真实任务（480p/4 s 冷启动 74.6 s 全
 Railway `EROS_ENABLED=1`，部署 `169d226a`；验收任务 768p/5 s 冷启动 564 s 提交到成片、推理 92 s、峰值显存 30 GB，抽帧真实画面。
 踩的坑（CPU Pod 盘上限、卷被丢、满盘 heredoc、容器重启循环、xet 上传必败）全记在第十八节。
 
-**下一步（可选）：10Eros 的步数/shift 做 A/B（模板 env 即可，不用重建镜像）；两条 H3 链路同时热着会双份空闲费，看用量决定 10Eros 的保温窗口。**
+**下一步：第十九节——退役 Wan 和 LTX（用户 2026-09-04 拍板）。资源清理命令已备好，代码移除在新会话做。**
 
 ---
 
@@ -1023,3 +1023,41 @@ ComfyUI `comfy/ldm/minimax/model.py` 的 curve 格式定义（`use_adaln_curves`
 - 推理时间对比：同 768p/120 帧，PinkCherry+turbo LoRA 9 步 108 s，10Eros 8 步无 LoRA 92 s；192 帧 147 s（仍超线性）。
 - 10Eros 的 shift/步数只是"作者在 ComfyUI 的默认值"，没有做过 A/B；`H3_EXTRA_SERVER_ARGS_JSON` 和模板 env 都能调，不用重建镜像。
 - 第九节第 7 步"UI 两个能力"已完成；两条 H3 链路各自保温，同时热着会双份空闲费。
+
+---
+
+## 十九、2026-09-04 决定：退役 Wan 和 LTX，只留两条 H3 链路（待做）
+
+用户拍板「Wan 和 LTX 都删掉，不用了」。分两步：**资源清理（用户自跑）**和**代码移除（新会话做）**。
+
+### 1. 资源清理（现在就能做，用户自跑，分类器不让 Claude 删卷）
+
+```
+no_proxy='*' python3 scripts/runpod/cleanup_runpod.py --retire-wan-ltx          # dry-run 看清单
+no_proxy='*' python3 scripts/runpod/cleanup_runpod.py --retire-wan-ltx --yes    # 删两个 Wan 卷 + 11 个 Wan/LTX 模板
+```
+
+- 卷：`3xl6dvrx0p`、`nv7g5aobqn`（各 70 GB，合计约 $10/月）——这是仅剩的计费资源。
+- 模板（免费，只是清理）：LTX 7 个（含生产模板 `cbj3cbaipw`）、Wan 4 个。脚本会跳过 H3/10Eros 现役模板。
+- Railway 变量 23 个（`WAN_*`、`RUNPOD_WAN_POD_*`、`LTX_POD_ENABLED`、`RUNPOD_LTX_POD_*`）：`railway variable delete` 一次只能删一个且每次重部署，
+  **等代码移除提交后再删**（届时没有代码读它们，留着也无害；脚本 `--yes` 结束会打印逐条命令）。
+  在那之前**不要**把 `LTX_POD_ENABLED` 设成 0：会把新 LTX 任务路由到已删掉的 serverless endpoint。
+
+### 2. 代码移除范围（新会话，按 CLAUDE.md 的 plan / implement / test / deploy 分开）
+
+盘点（2026-09-04，按引用次数）：
+
+| 位置 | 要删的 |
+| --- | --- |
+| `src/ai_vedio/capabilities.py` | `wan-2.2-a14b-adult-v2`、`pinkcherry-ltx-2.3-v1.8`、`LTX_MODEL`/`LTX_POD_PROVIDER`、providers `runpod`/`runpod_wan_pod`/`runpod_ltx_pod` |
+| `src/ai_vedio/config.py` | `RunPodSettings`（serverless）、`load_runpod_settings`、`load_wan_runpod_settings`、`load_wan_pod_settings`、`load_ltx_pod_settings`（wan 37 处 / ltx 31 处） |
+| `src/ai_vedio/web.py` | `_runpod_client`/`_wan_runpod_client`/`_wan_pod_client`/`_ltx_pod_client`、三个字典的对应项、`_provider_for` 的 LTX 分支、`_runpod_provider_cost_guard_tick` 的 serverless tick、`create_task` 里 LTX/Wan 的校验（720p 10 秒上限等）、`WebSettings.wan_v2_enabled/ltx_pod_enabled`、`__WAN_V2_OPTION_STATE__`；**历史任务行的 provider 保留显示即可**，不要迁移数据库 |
+| `src/ai_vedio/runpod.py` | serverless `RunPodClient` 整个类（只剩 LTX/Wan serverless 用过），`RunPodPodClient` 留 |
+| 前端 | `app.js` 的 `modelNames`/`selfHostedModels`/`syncModelCapabilities` 里 wan/ltx 分支与提示文案；`index.html` 两个 option；阶段文案 `audio_model_load_*`/`audio_*` 是 Wan 专用，可删 |
+| workers / CI | `workers/wan-video/`、`workers/ltx-video/`、`.github/workflows/wan-worker.yml`、`ltx-worker.yml` 整个删；GHCR 包 `papa-wan-video`、`papa-ltx-video` 可留可删 |
+| scripts | `ltx_make_template.py` 删；`cleanup_runpod.py` 可以整个删（清理完成后没用了）；`h3_submit_and_follow.py` 里的 `MODEL=pinkcherry-ltx…` 注释 |
+| tests | `test_ltx_worker.py`、`test_wan_worker.py` 整个删；`test_runpod.py`（692 行，serverless 客户端测试为主）大部分删；`test_web.py` 8 个 wan/ltx 测试、`test_config.py` 1 个、`test_frontend.py` 的模型清单 |
+| 文档 | `.env.example` 的 serverless LTX / Wan / LTX Pod 三块；`README.md`；`docs/model-gpu-selection-2026-09.md` 加一句退役说明；本文第一节「决策与选型」 |
+
+验收标准：`pytest` 全过；`railway up` 后 healthz 200；网页只剩 H3 + 10Eros + Seedance；历史 Wan/LTX 任务在列表里仍能打开视频；
+守卫循环日志里不再出现 wan/ltx 链路。

@@ -3,6 +3,7 @@ network volumes nothing references any more.
 
 Usage: python3 cleanup_runpod.py            # dry run: show what would go
        python3 cleanup_runpod.py --yes      # actually delete
+       python3 cleanup_runpod.py --retire-wan-ltx [--yes]   # 2026-09-04: also the Wan volumes and every Wan/LTX template
 
 What stays, and why (checked against Railway variables on 2026-09-04):
   endpoint aoma1602mogius  LTX production (RUNPOD_ENDPOINT_ID), still serverless
@@ -63,6 +64,39 @@ if "--ltx-serverless" in sys.argv:
     KEEP_ENDPOINTS -= {"aoma1602mogius", V.get("RUNPOD_ENDPOINT_ID", "").strip()}
     KEEP_VOLUMES -= {"fn6at7unxa"}
 
+# 2026-09-04: Wan and LTX are retired (user decision; only the two H3 lanes
+# stay). Their last billed resources are the two Wan Pod-lane volumes; their
+# templates cost nothing but clutter the console. Opt in explicitly.
+TEMPLATES: dict[str, str] = {}
+RETIRE = "--retire-wan-ltx" in sys.argv
+if RETIRE:
+    VOLUMES["3xl6dvrx0p"] = "papa-wan22-fp8-models-ks2 70GB (Wan retired)"
+    VOLUMES["nv7g5aobqn"] = "papa-wan22-fp8-models-nc2 70GB (Wan retired)"
+    KEEP_VOLUMES -= {"3xl6dvrx0p", "nv7g5aobqn"}
+    TEMPLATES.update({
+        "kqwme3u0h9": "papa-ltx-pinkcherry-ne1-h100-production-template",
+        "bohcaweu3r": "papa-ltx-video-0f114c3",
+        "9xmzekz5td": "papa-ltx-video-1c29ff1",
+        "qr0q0vgq6e": "papa-ltx-video-95a387a",
+        "y37fgo6woo": "papa-ltx-video-eb1d706",
+        "km9g8f4guq": "papa-ltx-video-pro6000-pod-87901bc",
+        "cbj3cbaipw": "papa-ltx-volumefree-35ce3e0-defaults (LTX Pod lane production template)",
+        "xsv2a2pbe5": "papa-wan22-adult-v3-av-h100-ne1-production-template",
+        "hxisofun9i": "papa-wan22-fp8-pod-smoke-93f09e3",
+        "wjxhc0dtid": "papa-wan22-fp8-resident96-pod-2d53dce",
+        "kvpiykwb5d": "papa-wan22-fp8-sglang-93aeb9f",
+    })
+RETIRED_RAILWAY_VARS = [
+    "WAN_V2_ENABLED", "WAN_MODEL_ID", "WAN_MODEL_VERSION", "WAN_WORKFLOW_VERSION",
+    "WAN_ADULT_ADAPTER_ID", "WAN_ADULT_ADAPTER_VERSION", "WAN_ADULT_ADAPTER_STRENGTH",
+    "RUNPOD_WAN_POD_TEMPLATE_ID", "RUNPOD_WAN_POD_NETWORK_VOLUME_ID", "RUNPOD_WAN_POD_FALLBACK_NETWORK_VOLUME_ID",
+    "RUNPOD_WAN_POD_CALLBACK_URL", "RUNPOD_WAN_POD_GPU_ID", "RUNPOD_WAN_POD_DATA_CENTER_ID",
+    "RUNPOD_WAN_POD_FALLBACK_DATA_CENTER_ID", "RUNPOD_WAN_POD_ADDITIONAL_REGION_VOLUMES",
+    "RUNPOD_WAN_POD_MAX_PRICE_PER_HOUR", "RUNPOD_WAN_POD_MAX_RUNTIME_SECONDS",
+    "LTX_POD_ENABLED", "RUNPOD_LTX_POD_TEMPLATE_ID", "RUNPOD_LTX_POD_CALLBACK_URL",
+    "RUNPOD_LTX_POD_KEEP_WARM_SECONDS", "RUNPOD_LTX_POD_MAX_RUNTIME_SECONDS", "RUNPOD_LTX_POD_PREFERRED_DATA_CENTER_IDS",
+]
+
 
 def api(method, path):
     req = urllib.request.Request(
@@ -106,6 +140,17 @@ def main() -> int:
         print(("DELETE " if do_it else "would delete ") + f"volume {vid}: {why}")
         if do_it:
             print("   ->", api("DELETE", f"/networkvolumes/{vid}") or "ok")
+    live_templates = {t["id"]: t for t in api("GET", "/templates")}
+    for tid, why in TEMPLATES.items():
+        if tid not in live_templates:
+            print(f"template {tid} already gone")
+            continue
+        if tid in {V.get("RUNPOD_H3_POD_TEMPLATE_ID", "").strip(), V.get("RUNPOD_EROS_POD_TEMPLATE_ID", "").strip()}:
+            print(f"SKIP template {tid}: a live H3 lane uses it")
+            continue
+        print(("DELETE " if do_it else "would delete ") + f"template {tid}: {why}")
+        if do_it:
+            print("   ->", api("DELETE", f"/templates/{tid}") or "ok")
     if do_it:
         left = api("GET", "/networkvolumes")
         print(f"remaining volumes: {sum(v.get('size', 0) for v in left)} GB across {len(left)}; "
@@ -115,6 +160,11 @@ def main() -> int:
         print("  railway variable delete RUNPOD_H3_POD_FALLBACK_NETWORK_VOLUME_ID")
         if "--ltx-serverless" in sys.argv:
             print("  railway variable delete RUNPOD_ENDPOINT_ID")
+        if RETIRE:
+            print("  # Wan/LTX variables (each delete redeploys; the code that read them is gone after the retirement commit):")
+            for name in RETIRED_RAILWAY_VARS:
+                if name in V:
+                    print(f"  railway variable delete {name}")
         print("  railway up --detach")
     else:
         print("dry run only; re-run with --yes to delete")
