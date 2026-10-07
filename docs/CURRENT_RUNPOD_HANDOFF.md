@@ -1067,3 +1067,10 @@ no_proxy='*' python3 scripts/runpod/cleanup_runpod.py --retire-wan-ltx --yes    
 - **停摆根因**：模板上的 GHCR 注册表凭据 `cmtgxws1c003d14njrtc07zd2` 过期，RunPod 拉镜像 `IMAGE_AUTH_ERROR … denied`，Pod 建出 1 秒即 "Exited by Runpod"（REST GET 返回 EXITED 而非 404，守卫认不出，空等 30 分钟）。镜像匿名可拉，已 `PATCH /v1/templates/{id} {"containerRegistryAuthId":""}` 清掉两个现役模板的凭据；建模板脚本不再传 `registry`。另：账户余额曾为负（两个停机的 musetalk Pod 持续计盘费），已删。**RunPod 控制台 Inbox 直接写出 Pod 初始化错误，排查秒退先看那里。**
 - **代码**（提交 `419ed33`，部署 `697f70c7`）：`get_task` 识别 EXITED；`_tend_pod_lane` 删死 Pod 并 `requeue_without_pod` 重排队，`POD_EXIT_RETRY_LIMIT=2` 次后 failed。验收：10Eros 768p/5s 冷启动拿 GPU 1.5 s、下权重 110 s、加载 71 s、推理 274 s、峰值 30 GB，抽帧真实画面。
 - **菜单下线**（本节提交）：`capabilities.RETIRED_MODELS` = Wan、LTX、四个 Seedance；仍在 `SUPPORTED_MODELS` 里让历史任务正常渲染，`create_task` 对它们返回 410。`index.html` 只剩两个 H3 选项，默认 PinkCherry + 768p + 5 秒。第十九节的全量代码移除仍待做，本节只是用户可见面的下线。
+
+## 二十一、2026-10-07：H3 两条链路接入参考图首帧（FL2VA）
+
+- **用户诉求**：要带参考的生成，不止文生视频。第一期做 FL2VA 首帧（经典 I2V）：现有 fl2va 分区和 PinkCherry / 10Eros 权重**不变**，只是请求从 `task=t2va` 变成 `task=fl2va` + `conditions=[{type:image, uri:file://…, role:keyframe, frame_index:0}]`。Ref2VA（人物/风格参考、参考音频、参考视频）是第二期，要另一套 ref2va transformer 分区和对应 NSFW 权重（PinkCherry ref2va 只有 int8/pruned，10Eros beta5 hybrid 兼容两者但 curve 格式需还原），sglang 接口 `role:"reference"`、提示词用 `<Picture 1>`/`<Audio 1>` 标签。
+- **数据流**（提交 `8647cb8`）：`create_task` 对 H3 家族接收 JPG/PNG/WebP（HEIC/GIF 拒 422），原图存到卷 `generated-videos/references/{task_id}.{ext}`；守卫建 Pod 和热 Pod 拉活都经 `_reference_url_for` 把 `GET /api/internal/references/{task_id}`（Bearer = VIDEO_UPLOAD_TOKEN，与回调同一把）放进 job input 的 `reference` 块；worker `fetch_reference_image` 下载后用 Pillow 转正向 RGB PNG，`keyframe_conditions` 组条件。结果多了 `task` 与 `reference_frame_index` 字段，进度多了 `reference_download` 阶段。
+- **上线顺序**：push main 触发 `h3-worker.yml` 构建镜像 → `scripts/runpod/h3_make_template.py <sha>` 与 `eros_make_template.py <sha>` 各建新模板（已不带注册表凭据）→ `railway variable set RUNPOD_H3_POD_TEMPLATE_ID/RUNPOD_EROS_POD_TEMPLATE_ID` → `railway up`。**web 先于 worker 上线会让带图任务静默退化成 t2va**（旧 worker 不认 `reference`），所以模板先换。
+- 前端：H3 选中时参考图按钮可用，BytePlus 受信任素材库提示只对 Seedance 显示；`app.js?v=h3-ref-20261007`。
