@@ -208,3 +208,69 @@ def ensure_trigger(prompt: str, trigger: str) -> str:
     if not trigger or trigger.lower() in prompt.lower():
         return prompt
     return f"{trigger}, {prompt}"
+
+
+# -- Reference image (H3 FL2VA first-frame conditioning) ----------------------
+
+REFERENCE_MEDIA_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+
+
+def keyframe_conditions(reference: dict | None, image_path: Path | None) -> tuple[str, list[dict]]:
+    """(task, conditions) for SGLang: plain t2va without a reference, fl2va with
+    the reference pinned as the first (frame_index 0) or last (-1) frame.
+
+    FL2VA is the partition this worker already loads, so a keyframe costs no
+    extra weights; SGLang resolves the canvas from ``target`` and fits the
+    image to it.
+    """
+    if not reference or image_path is None:
+        return "t2va", []
+    frame_index = int(reference.get("frame_index", 0))
+    if frame_index not in (0, -1):
+        raise ValueError(f"reference.frame_index must be 0 (first) or -1 (last), got {frame_index}")
+    return "fl2va", [
+        {
+            "type": "image",
+            "uri": Path(image_path).resolve().as_uri(),
+            "role": "keyframe",
+            "frame_index": frame_index,
+        }
+    ]
+
+
+def fetch_reference_image(reference: dict, directory: Path, *, token: str, get=None) -> Path:
+    """Download the task's reference image next to the job and normalise it.
+
+    The control plane serves it over the authenticated internal route; the
+    bytes are re-encoded through Pillow (EXIF orientation applied, RGB) so the
+    pipeline never sees a rotated JPEG or a WebP it cannot decode. Without
+    Pillow the raw file is handed over as downloaded.
+    """
+    url = str(reference.get("url") or "").strip()
+    if not url:
+        raise ValueError("reference.url is required")
+    if get is None:
+        import httpx
+
+        def get(target: str, **kwargs):  # pragma: no cover - network
+            return httpx.get(target, follow_redirects=True, **kwargs)
+
+    response = get(url, headers={"Authorization": f"Bearer {token}"} if token else {}, timeout=120.0)
+    response.raise_for_status()
+    media = str(response.headers.get("content-type", "")).split(";")[0].strip().lower()
+    extension = REFERENCE_MEDIA_TYPES.get(media)
+    if not extension:
+        raise ValueError(f"unsupported reference image type: {media or 'unknown'}")
+    raw = response.content
+    if not raw:
+        raise ValueError("reference image is empty")
+    downloaded = Path(directory) / f"reference-raw.{extension}"
+    downloaded.write_bytes(raw)
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return downloaded
+    normalised = Path(directory) / "reference.png"
+    with Image.open(downloaded) as image:
+        ImageOps.exif_transpose(image).convert("RGB").save(normalised, format="PNG")
+    return normalised

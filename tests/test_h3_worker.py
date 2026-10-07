@@ -137,7 +137,8 @@ def test_h3_handler_uses_native_audio_and_no_comfyui() -> None:
     assert "import comfy" not in source
     assert '"-c:a"' not in source
     assert "from sglang.multimodal_gen import DiffGenerator" in source
-    assert '"task": "t2va"' in source
+    # t2va without a reference, fl2va with one: both from the FL2VA partition.
+    assert '"task": task' in source and "keyframe_conditions(reference, reference_path)" in source
     assert '"audio_flow_shift": AUDIO_FLOW_SHIFT' in source
     # The distilled checkpoint has one positive branch: no CFG, no negative
     # prompt. Sending either is rejected by the pipeline.
@@ -862,3 +863,52 @@ def test_eros_template_points_the_handler_at_the_downloader_layout() -> None:
 
     version = re.search(r'"H3_NSFW_MODEL_VERSION": "([^"]+)"', template).group(1)
     assert len(version) == 40, "pin the restored checkpoint's Hub revision"
+
+
+PNG_1x1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000"
+    "3fe8b7c2d4e0000000049454e44ae426082"
+)
+
+
+def test_h3_keyframe_conditions_switch_the_task_to_fl2va(tmp_path: Path) -> None:
+    config = load_worker_config()
+    assert config.keyframe_conditions(None, None) == ("t2va", [])
+    image = tmp_path / "reference.png"
+    image.write_bytes(PNG_1x1)
+    task, conditions = config.keyframe_conditions({"url": "x", "role": "keyframe", "frame_index": 0}, image)
+    assert task == "fl2va"
+    assert conditions == [{"type": "image", "uri": image.resolve().as_uri(), "role": "keyframe", "frame_index": 0}]
+    assert config.keyframe_conditions({"frame_index": -1}, image)[1][0]["frame_index"] == -1
+    with pytest.raises(ValueError):
+        config.keyframe_conditions({"frame_index": 3}, image)
+
+
+def test_h3_reference_image_is_fetched_with_the_callback_token(tmp_path: Path) -> None:
+    config = load_worker_config()
+    seen: dict = {}
+
+    class Response:
+        headers = {"content-type": "image/png"}
+        content = PNG_1x1
+
+        def raise_for_status(self) -> None:
+            pass
+
+    def get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs["headers"]
+        return Response()
+
+    path = config.fetch_reference_image(
+        {"url": "https://host.example/generate/api/internal/references/t1"}, tmp_path, token="secret", get=get
+    )
+    assert seen["url"].endswith("/references/t1")
+    assert seen["headers"] == {"Authorization": "Bearer secret"}
+    assert path.is_file() and path.stat().st_size > 0 and path.suffix in {".png", ".jpg"}
+
+    class Html(Response):
+        headers = {"content-type": "text/html; charset=utf-8"}
+
+    with pytest.raises(ValueError):
+        config.fetch_reference_image({"url": "https://host.example/x"}, tmp_path, token="", get=lambda *a, **k: Html())

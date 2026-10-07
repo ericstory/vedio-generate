@@ -27,6 +27,8 @@ from worker_config import (
     short_edge_for,
     validate_prompt,
     validate_runtime_budget,
+    fetch_reference_image,
+    keyframe_conditions,
 )
 
 
@@ -488,6 +490,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         budget_seconds=DENOISE_BUDGET_SECONDS,
     )
     generate_audio = bool(params.get("generate_audio", True))
+    reference = params.get("reference") if isinstance(params.get("reference"), dict) else None
     seed = int(params.get("seed", -1))
     if seed < 0:
         seed = int.from_bytes(os.urandom(4), "big")
@@ -500,6 +503,17 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         # Before anything expensive: a bad host must fail in seconds, not minutes.
         _progress(job, "gpu_probe", gpu=assert_gpu_healthy())
         download_seconds = ensure_models(job)
+        reference_path: Path | None = None
+        if reference:
+            # Fetch before the expensive load: a missing or bad image should
+            # fail the job in seconds, not after a minute of weight loading.
+            _progress(job, "reference_download")
+            reference_path = fetch_reference_image(
+                reference,
+                Path(directory),
+                token=os.getenv("VIDEO_UPLOAD_TOKEN", "") or os.getenv("POD_RESULT_CALLBACK_TOKEN", ""),
+            )
+        task, conditions = keyframe_conditions(reference, reference_path)
         _progress(job, "model_load_start")
         load_started = time.monotonic()
         generator = _generator()
@@ -519,8 +533,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "prompt": prompt,
             # H3 serves only the CFG-distilled single-positive branch: no
             # negative prompt, no guidance scale, no audio guidance scale.
-            "task": "t2va",
-            "conditions": [],
+            "task": task,
+            "conditions": conditions,
             "target": target,
             "num_inference_steps": steps,
             "flow_shift": FLOW_SHIFT,
@@ -556,6 +570,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         _progress(job, "complete", seconds=round(time.monotonic() - started, 3))
         return {
             "video_url": video_url,
+            "task": task,
+            "reference_frame_index": int(reference.get("frame_index", 0)) if reference else None,
             "seed": seed,
             "model_id": os.getenv("H3_MODEL_ID", "MiniMaxAI/MiniMax-H3"),
             "model_version": os.getenv(

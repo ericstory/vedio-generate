@@ -52,6 +52,10 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 WEB_DIR = PACKAGE_DIR / "web_assets"
 SESSION_COOKIE = "ai_video_session"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/heic"}
+# H3 FL2VA takes the reference as the clip's first frame; the worker decodes
+# it with Pillow, so only formats Pillow reads everywhere are accepted.
+H3_REFERENCE_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+REFERENCE_MEDIA_TYPES = {ext: media for media, ext in H3_REFERENCE_TYPES.items()}
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 MAX_VIDEO_BYTES = 250 * 1024 * 1024
 ALLOWED_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
@@ -794,6 +798,29 @@ def _lane_settings(provider: str) -> RunPodPodSettings | None:
     return None
 
 
+def _reference_path(reference_dir: Path, task_id: str) -> Path | None:
+    """The stored reference image of a task, whatever extension it was saved with."""
+    if not task_id or Path(task_id).name != task_id:
+        return None
+    for extension in H3_REFERENCE_TYPES.values():
+        candidate = reference_dir / f"{task_id}.{extension}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _reference_url_for(client: Any, task: dict[str, Any]) -> str:
+    """The internal URL a Pod worker fetches this task's reference image from.
+
+    Empty when the task has none or the client has no callback layout to hang
+    it on; a missing file then fails the job with a clear 404 on the worker.
+    """
+    if not task.get("has_reference"):
+        return ""
+    build = getattr(client, "reference_url", None)
+    return str(build(str(task["id"]))) if callable(build) else ""
+
+
 def _acquire_pending_pods(
     store: TaskStore, *, provider: str, client: RunPodPodClient, label: str
 ) -> None:
@@ -872,6 +899,7 @@ def _acquire_pending_pods(
                 watermark=True,
                 task_id=task_id,
                 capacity_retry_sweeps=1,
+                reference_url=_reference_url_for(client, task),
             )
         except SeedanceError as exc:
             if _is_capacity_error(exc) or _is_transient_provider_error(exc):
@@ -1128,6 +1156,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             or settings.database_path.parent / "generated-videos"
         )
         app.state.video_output_dir.mkdir(parents=True, exist_ok=True)
+        app.state.reference_dir = app.state.video_output_dir / "references"
+        app.state.reference_dir.mkdir(parents=True, exist_ok=True)
         guard_task: asyncio.Task[None] | None = None
         if settings.runpod_cost_guard_enabled:
             async def guard_loop() -> None:
@@ -1348,6 +1378,20 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         applied = store.update_progress(task_id, progress)
         return {"ok": True, "applied": applied}
 
+    @app.get(f"{settings.base_path}/api/internal/references/{{task_id}}")
+    async def reference_image(request: Request, task_id: str):
+        """A Pod worker fetches the task's reference image (same token as the callbacks)."""
+        configured_token = settings.video_upload_token
+        supplied = request.headers.get("authorization", "")
+        if not configured_token:
+            raise HTTPException(status_code=503, detail="Pod 回调通道尚未配置")
+        if not hmac.compare_digest(supplied, f"Bearer {configured_token}"):
+            raise HTTPException(status_code=401, detail="Pod 回调凭据无效")
+        path = _reference_path(request.app.state.reference_dir, task_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="参考图不存在")
+        return FileResponse(path, media_type=REFERENCE_MEDIA_TYPES[path.suffix[1:]])
+
     @app.post(f"{settings.base_path}/api/internal/pod-jobs/{{pod_id}}/next")
     async def next_pod_job(request: Request, pod_id: str):
         """A warm worker asks for its next job; 204 means keep waiting."""
@@ -1385,6 +1429,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 resolution=task["resolution"],
                 duration=int(task["duration"]),
                 generate_audio=bool(task.get("generate_audio", 1)),
+                reference_url=_reference_url_for(client, task),
             )
             result_url, progress_url = client.callback_urls(task_id)
         if job is None:
@@ -1495,6 +1540,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         is_self_hosted = model in SELF_HOSTED_MODELS
         store: TaskStore = request.app.state.store
         provider = _provider_for(model, settings)
+        reference_bytes: bytes | None = None
+        reference_extension = ""
         if is_self_hosted:
             unfinished = store.active_runpod(provider)
             if provider in POD_PROVIDERS and settings.runpod_cost_guard_enabled:
@@ -1527,9 +1574,15 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             if model == EROS_MODEL and not settings.eros_enabled:
                 raise HTTPException(status_code=503, detail="10Eros Max 链路尚未启用")
             if reference and reference.filename:
-                raise HTTPException(
-                    status_code=422, detail="H3 文生视频首版暂不接收参考图"
-                )
+                # FL2VA: the image becomes the first frame of the clip.
+                reference_extension = H3_REFERENCE_TYPES.get(reference.content_type or "")
+                if not reference_extension:
+                    raise HTTPException(
+                        status_code=422, detail="H3 参考图仅支持 JPG、PNG 或 WebP（作为视频首帧）"
+                    )
+                reference_bytes = await reference.read(MAX_IMAGE_BYTES + 1)
+                if len(reference_bytes) > MAX_IMAGE_BYTES:
+                    raise HTTPException(status_code=413, detail="参考图不能超过 30MB")
         if model == LTX_MODEL and reference and reference.filename:
             raise HTTPException(status_code=422, detail="自建模型首版暂不支持参考图")
         if model == "wan-2.2-a14b-adult-v2":
@@ -1545,7 +1598,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                     detail="Wan 720p 最长支持 10 秒：更长时长请改用 480p 或 LTX 模型",
                 )
         image_data_url = None
-        if reference and reference.filename:
+        if reference_bytes is None and reference and reference.filename:
             if reference.content_type not in ALLOWED_IMAGE_TYPES:
                 raise HTTPException(status_code=422, detail="参考图仅支持 JPG、PNG、WebP、GIF 或 HEIC")
             raw = await reference.read(MAX_IMAGE_BYTES + 1)
@@ -1564,10 +1617,15 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             "resolution": resolution,
             "duration": duration,
             "generate_audio": int(bool(generate_audio)),
-            "has_reference": int(bool(image_data_url)),
+            "has_reference": int(bool(image_data_url) or reference_bytes is not None),
             "status": "queued",
             "created_at": created_at,
         }
+        if reference_bytes is not None:
+            # Kept on the volume next to the videos; the worker pulls it over
+            # the internal route when the task gets its Pod.
+            reference_dir: Path = request.app.state.reference_dir
+            (reference_dir / f"{task_id}.{reference_extension}").write_bytes(reference_bytes)
         if provider in POD_PROVIDERS and settings.runpod_cost_guard_enabled:
             # One-shot Pod lanes get their GPU from the guard loop, not inside
             # this request: a capacity miss then costs a short wait in the task
@@ -1598,6 +1656,8 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
                 )
                 if provider in POD_PROVIDERS:
                     options["task_id"] = task_id
+                    if reference_bytes is not None:
+                        options["reference_url"] = _reference_url_for(client, task)
                 if image_data_url and not is_self_hosted:
                     return client.create_reference_video(
                         prompt=prompt, image_url=image_data_url, model=model, **options

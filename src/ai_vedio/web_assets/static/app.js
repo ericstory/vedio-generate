@@ -125,11 +125,14 @@ function closeSidebar(){ $('#sidebar').classList.remove('open'); $('#sidebar-scr
 function syncModelCapabilities() {
   const model=$('#model').value; const selfHosted=selfHostedModels.has(model); const wan=model==='wan-2.2-a14b-adult-v2'; const h3=H3_MODELS.has(model); const eros=model===EROS_MODEL;
   const referenceControl=$('#reference-control'); const audio=$('#generate-audio');
-  referenceControl.classList.toggle('disabled', selfHosted);
-  $('#reference').disabled=selfHosted;
+  // H3 takes an optional reference image as the clip's first frame (FL2VA);
+  // the other self-hosted lanes never accepted one.
+  const noReference=selfHosted && !h3;
+  referenceControl.classList.toggle('disabled', noReference);
+  $('#reference').disabled=noReference;
   // H3 renders its soundtrack natively and can drop it on request; Wan runs a
   // second audio model; LTX always ships audio.
-  if(selfHosted){ clearReference(); audio.checked=true; audio.disabled=!(wan||h3); }
+  if(selfHosted){ if(noReference) clearReference(); audio.checked=true; audio.disabled=!(wan||h3); }
   else { audio.checked=true; audio.disabled=false; }
   $('#audio-control').hidden=selfHosted && !(wan||h3);
   $('#model-hint').hidden=!selfHosted;
@@ -146,9 +149,9 @@ function syncModelCapabilities() {
   Array.from($('#ratio').options).forEach(option=>option.disabled=false);
   Array.from($('#duration').options).forEach(option=>option.disabled=false);
   $('#model-hint').innerHTML=eros
-    ? '<b>自建 · 云 GPU 按需 Pod</b> · MiniMax H3 + 10Eros Max（TURBO 蒸馏已烤进权重，不加 LoRA）· 768p · 4–15 秒 · 原生同步音频 · 提交后自动排队申请 GPU，约 5–8 分钟出片'
+    ? '<b>自建 · 云 GPU 按需 Pod</b> · MiniMax H3 + 10Eros Max（TURBO 蒸馏已烤进权重，不加 LoRA）· 768p · 4–15 秒 · 原生同步音频 · 可选参考图作为首帧（图生视频）· 提交后自动排队申请 GPU，约 5–8 分钟出片'
     : h3
-    ? '<b>自建主线 · 云 GPU 按需 Pod</b> · MiniMax H3 + PinkCherry · 768p · 4–15 秒 · 原生同步音频 · 提交后自动排队申请 GPU，约 5–8 分钟出片'
+    ? '<b>自建主线 · 云 GPU 按需 Pod</b> · MiniMax H3 + PinkCherry · 768p · 4–15 秒 · 原生同步音频 · 可选参考图作为首帧（图生视频）· 提交后自动排队申请 GPU，约 5–8 分钟出片'
     : wan
     ? '<b>独立云 GPU 质量链路</b> · Wan 2.2 A14B · 成人双 LoRA · 4–15 秒 · 全画幅 · AI 生成音效'
     : '<b>独立云 GPU 链路</b> · LTX 2.3 Distilled · 提示词直接生成同步音视频，首版不含参考图';
@@ -183,7 +186,8 @@ $('#reference').addEventListener('change', event => {
     }
     URL.revokeObjectURL(objectUrl);
   };
-  preview.src=objectUrl; $('#reference-name').textContent=file.name; $('#reference-preview').hidden=false; $('#reference-guide').hidden=false;
+  // The trusted-library notice is BytePlus policy; H3 uses the image as a frame.
+  preview.src=objectUrl; $('#reference-name').textContent=file.name; $('#reference-preview').hidden=false; $('#reference-guide').hidden=H3_MODELS.has($('#model').value);
 });
 function clearReference(){ $('#reference').value=''; $('#reference-image').removeAttribute('src'); $('#reference-preview').hidden=true; $('#reference-guide').hidden=true; }
 $('#remove-reference').addEventListener('click', clearReference);

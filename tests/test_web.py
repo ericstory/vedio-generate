@@ -13,7 +13,7 @@ from ai_vedio.web import (
     _valid_session,
     create_app,
 )
-from ai_vedio.web import _generation_error
+from ai_vedio.web import _generation_error, _reference_path, _reference_url_for
 from ai_vedio.seedance import SeedanceError
 from ai_vedio.runpod import RunPodError
 
@@ -1406,12 +1406,13 @@ def test_eros_lane_is_its_own_flag_gated_h3_family_member(tmp_path: Path, monkey
         assert task["provider_metadata"]["progress"]["stage"] == "awaiting_gpu"
         # The PinkCherry lane stays behind its own flag.
         assert client.post("/generate/api/tasks", data={**form, "model": "minimax-h3-pinkcherry"}).status_code == 503
-        # 1080p is refused with the H3 wording, and a reference image is refused like H3.
+        # 1080p is refused with the H3 wording; a reference image is taken as the first frame (FL2VA), like H3.
         assert "768p" in client.post("/generate/api/tasks", data={**form, "resolution": "1080p"}).json()["detail"]
         with_reference = client.post(
             "/generate/api/tasks", data=form, files={"reference": ("ref.png", b"\x89PNG\r\n\x1a\n" + bytes(16), "image/png")}
         )
-        assert with_reference.status_code == 422
+        assert with_reference.status_code == 201, with_reference.text
+        assert with_reference.json()["task"]["has_reference"] is True
 
 
 def test_eros_pod_lane_job_carries_the_restored_checkpoint_pin() -> None:
@@ -1426,3 +1427,57 @@ def test_eros_pod_lane_job_carries_the_restored_checkpoint_pin() -> None:
     job = RunPodPodClient(settings).job_input(prompt="sunrise", resolution="768p", duration=5)
     assert job["adult_model_id"] == "Andrew3453/10Eros-Max-h3-restored" and job["adult_model_version"] == "abc123"
     assert "adult_adapter_id" not in job and job["workflow_version"] == "h3-fl2va-10eros-beta4-v1"
+
+
+PNG_1x1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000"
+    "3fe8b7c2d4e0000000049454e44ae426082"
+)
+
+
+def test_h3_reference_image_is_stored_and_served_to_the_worker(tmp_path: Path, monkeypatch) -> None:
+    """FL2VA first-frame: the upload lands on the volume and the Pod fetches it with the callback token."""
+    monkeypatch.setenv("RUNPOD_H3_POD_TEMPLATE_ID", "tpl")
+    monkeypatch.setattr(web, "_runpod_cost_guard_tick", lambda *a, **k: False)
+    settings = replace(
+        web_settings(tmp_path), h3_enabled=True, runpod_cost_guard_enabled=True, video_upload_token="pod-token"
+    )
+    with TestClient(create_app(settings)) as client:
+        client.post(
+            "/generate/api/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        form = {"prompt": "she turns and smiles", "model": "minimax-h3-pinkcherry", "ratio": "16:9", "resolution": "768p", "duration": 5}
+        heic = client.post("/generate/api/tasks", data=form, files={"reference": ("a.heic", b"x", "image/heic")})
+        assert heic.status_code == 422
+        created = client.post("/generate/api/tasks", data=form, files={"reference": ("a.png", PNG_1x1, "image/png")})
+        assert created.status_code in (200, 201), created.text
+        task = created.json()["task"]
+        assert task["has_reference"] is True and task["status"] == "queued"
+        stored = _reference_path(client.app.state.reference_dir, task["id"])
+        assert stored is not None and stored.read_bytes() == PNG_1x1
+        url = f"/generate/api/internal/references/{task['id']}"
+        assert client.get(url).status_code == 401
+        served = client.get(url, headers={"Authorization": "Bearer pod-token"})
+        assert served.status_code == 200
+        assert served.headers["content-type"].startswith("image/png")
+        assert served.content == PNG_1x1
+        assert client.get("/generate/api/internal/references/nope", headers={"Authorization": "Bearer pod-token"}).status_code == 404
+
+
+def test_pod_job_input_carries_the_reference_for_fl2va() -> None:
+    from ai_vedio.runpod import RunPodPodClient
+
+    client = RunPodPodClient(_pod_settings())
+    assert client.reference_url("t1") == "https://host.example/generate/api/internal/references/t1"
+    plain = client.job_input(prompt="x")
+    assert "reference" not in plain
+    job = client.job_input(prompt="x", reference_url=client.reference_url("t1"))
+    assert job["reference"] == {
+        "url": "https://host.example/generate/api/internal/references/t1",
+        "role": "keyframe",
+        "frame_index": 0,
+    }
+    assert _reference_url_for(client, {"id": "t1", "has_reference": 1}) == client.reference_url("t1")
+    assert _reference_url_for(client, {"id": "t1", "has_reference": 0}) == ""
+    assert _reference_url_for(object(), {"id": "t1", "has_reference": 1}) == ""

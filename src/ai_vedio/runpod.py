@@ -283,6 +283,17 @@ class RunPodPodClient:
             progress_url = callback_url.replace("/pod-result", "/pod-progress")
         return callback_url, progress_url
 
+    def reference_url(self, task_id: str) -> str:
+        """Where the worker downloads a task's reference image.
+
+        Lives next to the callback routes and is guarded by the same token;
+        empty when a customized callback URL opted out of the standard layout.
+        """
+        base = self.settings.callback_url.rstrip("/")
+        if not base.endswith("/pod-result"):
+            return ""
+        return f"{base[: -len('/pod-result')]}/references/{task_id}"
+
     def jobs_base_url(self) -> str:
         """Where a warm worker asks for its next job; empty when keep-warm is off."""
         if self.settings.keep_warm_idle_seconds <= 0:
@@ -300,6 +311,7 @@ class RunPodPodClient:
         resolution: str = "480p",
         duration: int = 5,
         generate_audio: bool = True,
+        reference_url: str = "",
     ) -> dict[str, Any]:
         """The worker's job input: the request plus this lane's pinned weights."""
         job: dict[str, Any] = {
@@ -312,6 +324,10 @@ class RunPodPodClient:
             "duration": duration,
             "generate_audio": generate_audio,
         }
+        if reference_url:
+            # First-frame conditioning (H3 FL2VA): the worker fetches the image
+            # with its callback token and hands SGLang a keyframe condition.
+            job["reference"] = {"url": reference_url, "role": "keyframe", "frame_index": 0}
         # Each lane pins its adult layer with exactly one of these shapes, and
         # the Worker rejects the job when the submitted pin disagrees with the
         # weights it actually loaded. Wan adapts a base model with a LoRA; H3
@@ -338,6 +354,7 @@ class RunPodPodClient:
             resolution=options.get("resolution", "480p"),
             duration=options.get("duration", 5),
             generate_audio=options.get("generate_audio", True),
+            reference_url=str(options.get("reference_url") or ""),
         )
         template = self._request("GET", f"/templates/{self.settings.template_id}")
         template_env = template.get("env") if isinstance(template.get("env"), dict) else {}
