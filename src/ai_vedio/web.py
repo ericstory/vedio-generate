@@ -60,6 +60,8 @@ ALLOWED_RESOLUTIONS = {"480p", "720p", "768p", "1080p"}
 H3_MODEL = "minimax-h3-pinkcherry"
 ALLOWED_DURATIONS = set(range(4, 16))
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
+# How many times a task may lose its Pod to a host death before it fails.
+POD_EXIT_RETRY_LIMIT = 2
 # A Pod lane runs one GPU Pod at a time. While that Pod is busy or warm, further
 # submissions queue behind it up to this depth: enough to line up a few prompts
 # for a warm worker, small enough that a forgotten queue cannot keep a Pod
@@ -233,6 +235,30 @@ class TaskStore:
             db.execute(
                 "UPDATE tasks SET provider_task_id=?, updated_at=? WHERE id=?",
                 (provider_task_id, _now(), task_id),
+            )
+
+    def requeue_without_pod(self, task_id: str, *, restarts: int) -> None:
+        """Put a task back in the queue after its Pod died before delivering.
+
+        Clears the Pod binding and the per-Pod clocks so the next acquisition
+        pass treats it like a fresh queued task; ``pod_restarts`` keeps count
+        so a host that keeps dying cannot loop forever.
+        """
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT provider_metadata FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            metadata: dict[str, Any] = {}
+            if row and row["provider_metadata"]:
+                with suppress(ValueError, TypeError):
+                    metadata = json.loads(row["provider_metadata"])
+            for key in ("pod_created_at", "job_started_at", "progress", "gpu_name", "pod_price_per_hour", "pod_data_center_id"):
+                metadata.pop(key, None)
+            metadata["pod_restarts"] = restarts
+            db.execute(
+                """UPDATE tasks SET status='queued', provider_task_id='', error=NULL,
+                provider_metadata=?, updated_at=? WHERE id=?""",
+                (json.dumps(metadata, ensure_ascii=False), _now(), task_id),
             )
 
     def pending_pod_tasks(self, provider: str) -> list[dict[str, Any]]:
@@ -962,7 +988,7 @@ def _tend_pod_lane(
             )
             continue
         try:
-            client.get_task(pod_id)
+            remote = client.get_task(pod_id)
         except RunPodError as exc:
             if exc.status_code == 404:
                 store.retire_pod(pod_id)
@@ -974,6 +1000,26 @@ def _tend_pod_lane(
                         "error": f"{label} GPU Pod disappeared before returning a result",
                     },
                 )
+            continue
+        if str(remote.get("status") or "") == "exited":
+            # The host died under the worker (2026-10-07: "Exited by Runpod" one
+            # second after creation). An exited Pod still bills its disk and
+            # never calls back, so delete it and give the task another Pod;
+            # a few deaths in a row mean the lane itself is broken.
+            restarts = int(metadata.get("pod_restarts") or 0) + 1
+            _retire_and_delete(store, client, pod_id, reason="pod_exited")
+            if restarts > POD_EXIT_RETRY_LIMIT:
+                store.update_remote(
+                    task["id"],
+                    {
+                        "status": "failed",
+                        "content": {},
+                        "error": f"{label} GPU Pod exited before returning a result {restarts} times",
+                    },
+                )
+            else:
+                print(json.dumps({"event": "pod_exited_requeue", "task": task["id"], "pod": pod_id, "restarts": restarts}), flush=True)
+                store.requeue_without_pod(task["id"], restarts=restarts)
     pod = store.live_pod(provider)
     if pod is None:
         return
@@ -994,10 +1040,13 @@ def _tend_pod_lane(
         _retire_and_delete(store, client, pod["id"], from_states=("idle",), reason="max_lifetime")
         return
     try:
-        client.get_task(pod["id"])
+        remote = client.get_task(pod["id"])
     except RunPodError as exc:
         if exc.status_code == 404:
             store.retire_pod(pod["id"], from_states=("idle",))
+        return
+    if str(remote.get("status") or "") == "exited":
+        _retire_and_delete(store, client, pod["id"], from_states=("idle",), reason="pod_exited")
 
 
 def _sweep_orphan_pods(store: TaskStore, *, provider: str, client: RunPodPodClient) -> None:

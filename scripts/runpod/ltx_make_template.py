@@ -49,7 +49,8 @@ if __name__=="__main__":
         "name": f"papa-ltx-volumefree-{sha[:7]}-{suffix}",
         "image": f"ghcr.io/ericstory/papa-ltx-video:{sha}",
         "args": json.dumps({"cmd":["python","/app/smoke.py"]}),
-        "registry": "cmtgxws1c003d14njrtc07zd2",
+        # No registry credential: the GHCR package is public and the stored
+        # credential expired on 2026-10-07, which made every pull "denied".
         # ~79 GB of weights plus the image and working files.
         "disk": 120,
         "ports": ["8888/http","22/tcp"],

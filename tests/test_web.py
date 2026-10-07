@@ -1051,6 +1051,87 @@ def test_pod_runtime_cap_counts_from_pod_creation_not_from_the_click(tmp_path: P
     assert task and task["status"] == "processing"
 
 
+def _processing_pod_task(store: TaskStore, task_id: str, pod_id: str, *, restarts: int | None = None) -> None:
+    store.create(
+        {
+            "id": task_id,
+            "provider": "runpod_h3_pod",
+            "provider_task_id": pod_id,
+            "prompt": "x",
+            "model": "minimax-h3-pinkcherry",
+            "ratio": "16:9",
+            "resolution": "768p",
+            "duration": 5,
+            "has_reference": 0,
+            "status": "queued",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    content = {"pod_created_at": datetime.now(timezone.utc).isoformat(), "progress": {"stage": "pod_created"}}
+    if restarts is not None:
+        content["pod_restarts"] = restarts
+    store.update_remote(task_id, {"status": "queued", "content": content, "error": None})
+    store.register_pod("runpod_h3_pod", pod_id, task_id=task_id, metadata={})
+
+
+class _ExitedPod:
+    """RunPod kept the record but killed the host: GET returns EXITED, not 404."""
+
+    settings = _pod_settings()
+
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    def create_text_video(self, **kwargs):
+        raise AssertionError("acquisition is stubbed out in these tests")
+
+    def get_task(self, pod_id: str):
+        return {"id": pod_id, "status": "exited", "content": {"runtime_status": "exited"}, "error": None}
+
+    def delete_pod(self, pod_id: str):
+        self.deleted.append(pod_id)
+
+
+def _tend_with(monkeypatch, store: TaskStore, client) -> bool:
+    """Run one guard tick against a stub client; returns whether work remains."""
+    def fake_client():
+        yield client
+
+    monkeypatch.setenv("RUNPOD_H3_POD_TEMPLATE_ID", "tpl")
+    monkeypatch.delenv("RUNPOD_WAN_POD_TEMPLATE_ID", raising=False)
+    monkeypatch.setattr(web, "_h3_pod_client", fake_client)
+    monkeypatch.setattr(web, "_runpod_provider_cost_guard_tick", lambda *a, **k: False)
+    return _runpod_cost_guard_tick(store, shutdown_if_idle=False)
+
+
+def test_exited_pod_is_deleted_and_its_task_requeued(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _processing_pod_task(store, "lost-host", "pod-dead")
+    client = _ExitedPod()
+    assert _tend_with(monkeypatch, store, client) is True  # the requeued task is still work
+    assert client.deleted == ["pod-dead"]
+    assert store.get_pod("pod-dead")["state"] == "deleted"
+    row = store.active_runpod("runpod_h3_pod")[0]
+    assert row["status"] == "queued"
+    assert not row["provider_task_id"]
+    metadata = web._task_metadata(row)
+    assert metadata["pod_restarts"] == 1
+    assert "pod_created_at" not in metadata and "progress" not in metadata
+    # Back in the acquisition queue, so the next pass gives it a fresh Pod.
+    assert [t["id"] for t in store.pending_pod_tasks("runpod_h3_pod")] == ["lost-host"]
+
+
+def test_task_fails_after_its_pods_keep_dying(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    _processing_pod_task(store, "cursed", "pod-dead-3", restarts=web.POD_EXIT_RETRY_LIMIT)
+    client = _ExitedPod()
+    assert _tend_with(monkeypatch, store, client) is False  # nothing left to tend
+    assert client.deleted == ["pod-dead-3"]
+    task = store.get("cursed")
+    assert task and task["status"] == "failed"
+    assert "exited before returning a result 3 times" in task["error"]
+
+
 def test_store_restart_keeps_queued_pod_tasks_without_a_pod(tmp_path: Path) -> None:
     """The legacy provider-id backfill must not invent a Pod id for a queued task."""
     store = TaskStore(tmp_path / "tasks.db")

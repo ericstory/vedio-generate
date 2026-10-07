@@ -537,4 +537,9 @@ class RunPodPodClient:
         else:
             runtime = str(pod.get("status") or "").lower()
         status = "processing" if runtime in {"running", "initializing", "created"} else "queued"
-        return {"id": pod_id, "status": status, "content": {}, "error": None}
+        # RunPod sometimes creates the Pod, assigns a host and then kills it a
+        # second later ("Exited by Runpod"); the record stays, so a 404 check
+        # never fires and the row would sit until the runtime cap. Surface it.
+        if runtime in {"exited", "terminated", "dead"}:
+            status = "exited"
+        return {"id": pod_id, "status": status, "content": {"runtime_status": runtime}, "error": None}
