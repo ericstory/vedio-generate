@@ -912,3 +912,35 @@ def test_h3_reference_image_is_fetched_with_the_callback_token(tmp_path: Path) -
 
     with pytest.raises(ValueError):
         config.fetch_reference_image({"url": "https://host.example/x"}, tmp_path, token="", get=lambda *a, **k: Html())
+
+
+def test_h3_smoke_warms_up_without_a_job_then_pulls_the_queue(monkeypatch) -> None:
+    """A Pod started with no SMOKE_INPUT_JSON loads the weights first, then takes jobs."""
+    import sys
+    import types
+
+    calls: list[str] = []
+    stub = types.ModuleType("handler")
+    stub.handler = lambda job: {"video_url": "/generate/media/x.mp4"}
+    stub.ensure_models = lambda job=None: calls.append("ensure_models") or 0.0
+    stub._generator = lambda: calls.append("_generator")
+    monkeypatch.setitem(sys.modules, "handler", stub)
+    spec = importlib.util.spec_from_file_location("h3_smoke_warm", WORKER_ROOT / "smoke.py")
+    assert spec and spec.loader
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    monkeypatch.setenv("SMOKE_INPUT_JSON", "")
+    monkeypatch.setenv("POD_JOBS_BASE_URL", "https://host.example/generate/api/internal/pod-jobs")
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-9")
+    monkeypatch.setenv("POD_RESULT_CALLBACK_TOKEN", "tok")
+    pulled: list[tuple[str, str]] = []
+    monkeypatch.setattr(smoke, "_tee_process_output", lambda: None)
+    monkeypatch.setattr(smoke, "pull_jobs", lambda url, token, run: pulled.append((url, token)))
+    monkeypatch.setattr(smoke, "_await_deletion", lambda: None)
+    smoke.main()
+    assert calls == ["ensure_models", "_generator"]
+    assert pulled == [("https://host.example/generate/api/internal/pod-jobs/pod-9/next", "tok")]
+    # Without a queue to pull there is nothing for a job-less Pod to do.
+    monkeypatch.delenv("POD_JOBS_BASE_URL")
+    with pytest.raises(RuntimeError):
+        smoke.main()

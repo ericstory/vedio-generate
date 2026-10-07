@@ -71,7 +71,10 @@ POD_EXIT_RETRY_LIMIT = 2
 # submissions queue behind it up to this depth: enough to line up a few prompts
 # for a warm worker, small enough that a forgotten queue cannot keep a Pod
 # billing for hours.
-MAX_UNFINISHED_POD_TASKS = 3
+# Unfinished Pod-lane tasks a user may have in flight (queued + running).
+# Raised from 3 on 2026-10-07 for batch work; the guard adds Pods up to each
+# lane's RUNPOD_<LANE>_POD_MAX_PODS while the queue outnumbers them.
+MAX_UNFINISHED_POD_TASKS = max(1, int(os.getenv("POD_QUEUE_LIMIT", "24")))
 # Production Pods are named "<lane prefix>-<first 12 hex chars of the task id>".
 # Diagnostic Pods from scripts/runpod are "<prefix>-<tag>-<n>" and never match,
 # so the orphan sweep cannot touch them.
@@ -291,8 +294,13 @@ class TaskStore:
             error = json.dumps(error, ensure_ascii=False)
         with self.connect() as db:
             row = db.execute(
-                "SELECT provider_metadata FROM tasks WHERE id=?", (task_id,)
+                "SELECT status, provider_metadata FROM tasks WHERE id=?", (task_id,)
             ).fetchone()
+            if row and row["status"] in TERMINAL_STATUSES and status not in TERMINAL_STATUSES:
+                # A provider poll that raced the terminal callback must not
+                # revive the task (2026-10-07: a failed H3 job was polled back
+                # to "processing", lost its error, then "expired").
+                return
             provider_metadata: dict[str, Any] = {}
             if row and row["provider_metadata"]:
                 with suppress(ValueError, TypeError):
@@ -378,36 +386,63 @@ class TaskStore:
         provider: str,
         pod_id: str,
         *,
-        task_id: str,
+        task_id: str | None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Record a freshly created Pod, busy with the task it was created for."""
+        """Record a freshly created Pod: busy with the task it was created for,
+        or idle from the start when it was warmed up without one."""
         now = _now()
+        state = "busy" if task_id else "idle"
         with self.connect() as db:
             db.execute(
                 """INSERT OR REPLACE INTO pods
                 (id, provider, state, current_task_id, created_at, idle_since,
                  jobs_completed, metadata, updated_at)
-                VALUES (?, ?, 'busy', ?, ?, NULL, 0, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)""",
                 (
                     pod_id,
                     provider,
-                    task_id,
+                    state,
+                    task_id or None,
                     now,
+                    None if task_id else now,
                     json.dumps(metadata or {}, ensure_ascii=False),
                     now,
                 ),
             )
 
-    def live_pod(self, provider: str) -> dict[str, Any] | None:
-        """The lane's busy or idle Pod, if it has one."""
+    def live_pods(self, provider: str) -> list[dict[str, Any]]:
+        """The lane's busy and idle Pods, oldest first."""
         with self.connect() as db:
-            row = db.execute(
+            rows = db.execute(
                 """SELECT * FROM pods WHERE provider=? AND state IN ('busy', 'idle')
-                ORDER BY created_at ASC LIMIT 1""",
+                ORDER BY created_at ASC""",
                 (provider,),
-            ).fetchone()
-        return _pod_row(row)
+            ).fetchall()
+        return [_pod_row(row) for row in rows]
+
+    def live_pod(self, provider: str) -> dict[str, Any] | None:
+        """The lane's oldest busy or idle Pod, if it has one."""
+        pods = self.live_pods(provider)
+        return pods[0] if pods else None
+
+    def touch_pod_poll(self, pod_id: str) -> None:
+        """Note that the worker on this Pod is up and asking for jobs."""
+        with self.connect() as db:
+            row = db.execute("SELECT metadata FROM pods WHERE id=?", (pod_id,)).fetchone()
+            if not row:
+                return
+            metadata: dict[str, Any] = {}
+            if row["metadata"]:
+                with suppress(ValueError, TypeError):
+                    metadata = json.loads(row["metadata"])
+            now = _now()
+            metadata.setdefault("worker_ready_at", now)
+            metadata["worker_polled_at"] = now
+            db.execute(
+                "UPDATE pods SET metadata=?, updated_at=? WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False), now, pod_id),
+            )
 
     def get_pod(self, pod_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -840,12 +875,16 @@ def _acquire_pending_pods(
     pending = store.pending_pod_tasks(provider)
     if not pending:
         return
-    live = store.live_pod(provider)
-    if live is None:
+    live_pods = store.live_pods(provider)
+    if not live_pods:
         # Tasks that got a Pod before the pods table existed still hold it.
-        live_task_pods = [t for t in store.active_runpod(provider) if t.get("provider_task_id")]
-        live = {"id": live_task_pods[0]["provider_task_id"]} if live_task_pods else None
-    if live is not None:
+        live_pods = [
+            {"id": t["provider_task_id"]} for t in store.active_runpod(provider) if t.get("provider_task_id")
+        ]
+    # One more Pod per tick while queued tasks outnumber the lane's Pods and
+    # the lane may still grow; otherwise the warm workers pull the queue.
+    if len(live_pods) >= max(1, int(getattr(client.settings, "max_pods", 1))):
+        live = live_pods[0]
         for position, task in enumerate(pending, start=1):
             progress = _progress_of(task)
             # The capacity deadline only runs while RunPod is actually being
@@ -1030,7 +1069,7 @@ def _tend_pod_lane(
                     },
                 )
             continue
-        if str(remote.get("status") or "") == "exited":
+        if _pod_exited(remote):
             # The host died under the worker (2026-10-07: "Exited by Runpod" one
             # second after creation). An exited Pod still bills its disk and
             # never calls back, so delete it and give the task another Pod;
@@ -1049,9 +1088,20 @@ def _tend_pod_lane(
             else:
                 print(json.dumps({"event": "pod_exited_requeue", "task": task["id"], "pod": pod_id, "restarts": restarts}), flush=True)
                 store.requeue_without_pod(task["id"], restarts=restarts)
-    pod = store.live_pod(provider)
-    if pod is None:
-        return
+    for pod in store.live_pods(provider):
+        _tend_live_pod(store, client=client, pod=pod, now=now)
+
+
+def _pod_exited(remote: dict[str, Any]) -> bool:
+    content = remote.get("content") if isinstance(remote.get("content"), dict) else {}
+    return str(content.get("runtime_status") or "").lower() in {"exited", "terminated", "dead"}
+
+
+def _tend_live_pod(
+    store: TaskStore, *, client: RunPodPodClient, pod: dict[str, Any], now: datetime
+) -> None:
+    """Idle window, lifetime and existence of one busy or idle Pod."""
+    settings = client.settings
     if pod["state"] == "busy":
         current = store.get(str(pod.get("current_task_id") or "")) if pod.get("current_task_id") else None
         if current is None or current["status"] in TERMINAL_STATUSES:
@@ -1074,7 +1124,7 @@ def _tend_pod_lane(
         if exc.status_code == 404:
             store.retire_pod(pod["id"], from_states=("idle",))
         return
-    if str(remote.get("status") or "") == "exited":
+    if _pod_exited(remote):
         _retire_and_delete(store, client, pod["id"], from_states=("idle",), reason="pod_exited")
 
 
@@ -1407,6 +1457,7 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             # Retired: the worker stops asking and waits to be deleted.
             raise HTTPException(status_code=404, detail="Pod 未登记或已回收")
         provider = str(pod["provider"])
+        store.touch_pod_poll(pod_id)
         lane = _lane_settings(provider)
         if lane is None or lane.keep_warm_idle_seconds <= 0:
             return Response(status_code=204)
@@ -1475,6 +1526,109 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="视频不存在")
         return FileResponse(path, media_type="video/mp4")
 
+    def _lane_status(store: TaskStore, model: str) -> dict[str, Any]:
+        provider = _provider_for(model, settings)
+        lane = _lane_settings(provider)
+        pods = []
+        for pod in store.live_pods(provider):
+            metadata = pod.get("metadata") or {}
+            if pod["state"] == "busy":
+                state = "busy"
+            elif metadata.get("worker_ready_at"):
+                state = "ready"
+            else:
+                state = "starting"
+            pods.append(
+                {
+                    "id": pod["id"],
+                    "state": state,
+                    "created_at": pod["created_at"],
+                    "idle_since": pod.get("idle_since"),
+                    "worker_ready_at": metadata.get("worker_ready_at"),
+                    "current_task_id": pod.get("current_task_id"),
+                }
+            )
+        queued = len(store.pending_pod_tasks(provider))
+        return {
+            "model": model,
+            "provider": provider,
+            "max_pods": int(getattr(lane, "max_pods", 1) or 1) if lane else 1,
+            "keep_warm_seconds": float(getattr(lane, "keep_warm_idle_seconds", 0) or 0) if lane else 0,
+            "queued": queued,
+            "pods": pods,
+        }
+
+    @app.get(f"{settings.base_path}/api/lanes")
+    async def list_lanes(request: Request):
+        """Live GPU state per H3 lane, for the composer's warm-up control."""
+        _require_auth(request)
+        store: TaskStore = request.app.state.store
+        lanes = []
+        for model in H3_FAMILY:
+            enabled = settings.h3_enabled if model == H3_MODEL else settings.eros_enabled
+            if enabled and os.getenv(POD_TEMPLATE_ENV_VARS[_provider_for(model, settings)], "").strip():
+                lanes.append(_lane_status(store, model))
+        return {"lanes": sorted(lanes, key=lambda lane: lane["model"])}
+
+    @app.post(f"{settings.base_path}/api/lanes/{{model}}/warm")
+    async def warm_lane(request: Request, model: str):
+        """Start the lane's GPU before the prompt is ready, so the cold start
+        overlaps with writing it. Idempotent: an existing Pod is reported, not
+        duplicated, up to the lane's Pod limit."""
+        _require_auth(request)
+        if model not in H3_FAMILY:
+            raise HTTPException(status_code=422, detail="只有 MiniMax H3 链路支持预热")
+        enabled = settings.h3_enabled if model == H3_MODEL else settings.eros_enabled
+        if not enabled:
+            raise HTTPException(status_code=503, detail="该链路尚未启用")
+        provider = _provider_for(model, settings)
+        if not os.getenv(POD_TEMPLATE_ENV_VARS[provider], "").strip():
+            raise HTTPException(status_code=503, detail="该链路尚未配置 Pod 模板")
+        store: TaskStore = request.app.state.store
+        body = {}
+        with suppress(Exception):
+            body = await request.json()
+        wanted = max(1, min(int((body or {}).get("count") or 1), 8))
+        status = _lane_status(store, model)
+        if status["keep_warm_seconds"] <= 0:
+            raise HTTPException(status_code=503, detail="该链路未开启保温，预热的 GPU 会立刻被回收")
+        room = status["max_pods"] - len(status["pods"])
+        to_start = min(wanted - len(status["pods"]), room)
+        started: list[str] = []
+        if to_start > 0:
+            def start() -> list[str]:
+                ids: list[str] = []
+                for client in POD_CLIENT_FACTORIES[provider]():
+                    for _ in range(to_start):
+                        warm_id = str(uuid4())
+                        remote = client.create_warm_pod(warm_id=warm_id, capacity_retry_sweeps=1)
+                        pod_id = str(remote.get("id") or "")
+                        if not pod_id:
+                            break
+                        content = dict(remote.get("content") or {})
+                        store.register_pod(
+                            provider,
+                            pod_id,
+                            task_id=None,
+                            metadata={
+                                "warm": True,
+                                **{k: content[k] for k in ("gpu_name", "pod_price_per_hour", "pod_data_center_id") if content.get(k) is not None},
+                            },
+                        )
+                        print(json.dumps({"event": "pod_warmed", "pod": pod_id, "provider": provider}), flush=True)
+                        ids.append(pod_id)
+                return ids
+
+            try:
+                started = await asyncio.to_thread(start)
+            except SeedanceError as exc:
+                if _is_capacity_error(exc) or _is_transient_provider_error(exc):
+                    raise HTTPException(status_code=503, detail="云 GPU 暂时没有空闲机器，请稍后再试") from exc
+                return _generation_error(exc)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"lane": _lane_status(store, model), "started": started}
+
     @app.get(f"{settings.base_path}/api/tasks")
     async def list_tasks(request: Request):
         _require_auth(request)
@@ -1484,8 +1638,9 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
         if active:
             def refresh() -> None:
                 for task in active[:10]:
-                    if task.get("provider") in POD_PROVIDERS and not task.get("provider_task_id"):
-                        # Queued for a GPU; the guard loop owns it until a Pod exists.
+                    if task.get("provider") in POD_PROVIDERS:
+                        # Pod lanes report through their callbacks and the guard
+                        # loop; polling the Pod here only ever raced them.
                         continue
                     try:
                         for client in _provider_client(task.get("provider") or "seedance"):
@@ -1567,6 +1722,11 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=422, detail="768p 只有 MiniMax H3 支持"
             )
+        if model in H3_FAMILY and resolution != "768p":
+            # 768 is H3's short edge and the only recipe the worker accepts; a
+            # 480p/720p request would cost a full cold start before SGLang
+            # rejects it (2026-09-05 and 2026-10-07 both lost a Pod to this).
+            raise HTTPException(status_code=422, detail="MiniMax H3 只支持 768p，请把清晰度改成 768p")
         if model in H3_FAMILY:
             # Each H3 checkpoint is its own lane with its own switch.
             if model == H3_MODEL and not settings.h3_enabled:

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <base href="__BASE_PATH__/">
   <title>AI 视频生成 · WhichDrama Studio</title>
-  <link rel="stylesheet" href="./static/app.css?v=h3-ref-20261007">
+  <link rel="stylesheet" href="./static/app.css?v=h3-warm-20261007">
 </head>
 <body class="app-page">
   <aside class="sidebar" id="sidebar">
@@ -69,6 +69,10 @@
           <button id="submit-button" class="generate-button" type="submit"><span>✦</span> 开始生成</button>
         </div>
         <p id="model-hint" class="model-hint" hidden><b>独立云 GPU 链路</b></p>
+        <div id="lane-bar" class="lane-bar" hidden>
+          <span id="lane-status" class="lane-status">GPU 未启动</span>
+          <button id="warm-button" class="warm-button" type="button" title="先把云 GPU 拉起来，写提示词的几分钟正好完成冷启动">⚡ 预热 GPU</button>
+        </div>
         <div class="composer-meta"><span id="char-count">0 / 3000</span><span>支持中文与英文描述</span></div>
       </form>
 
@@ -111,6 +115,6 @@
       <button id="error-confirm" class="primary-button" type="button">我知道了</button>
     </section>
   </div>
-  <script src="./static/app.js?v=h3-ref-20261007" defer></script>
+  <script src="./static/app.js?v=h3-warm-20261007" defer></script>
 </body>
 </html>

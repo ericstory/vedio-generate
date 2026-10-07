@@ -92,6 +92,33 @@ function renderTasks() {
   }).join('');
   list.querySelectorAll('.task-item').forEach(el => el.addEventListener('click', () => openTask(el.dataset.id)));
 }
+// -- Lane warm-up: the cold start (download + load, 4-5 min) overlaps with writing the prompt.
+let laneState={lanes:[]};
+function laneOf(model){ return laneState.lanes.find(lane=>lane.model===model); }
+function renderLane(){
+  const model=$('#model').value; const bar=$('#lane-bar'); const lane=laneOf(model);
+  if(!H3_MODELS.has(model) || !lane){ bar.hidden=true; return; }
+  bar.hidden=false; const status=$('#lane-status'); const button=$('#warm-button');
+  const pods=lane.pods||[]; const ready=pods.filter(p=>p.state==='ready').length; const busy=pods.filter(p=>p.state==='busy').length; const starting=pods.filter(p=>p.state==='starting').length;
+  const keep=Math.round((lane.keep_warm_seconds||0)/60);
+  let cls='', text='GPU 未启动 · 提交后需 7–9 分钟冷启动';
+  if(busy && !ready && !starting){ cls='busy'; text=`GPU 工作中（${busy} 台）· 队列 ${lane.queued} 条，完成后立即接下一条`; }
+  else if(ready){ cls='ready'; text=`GPU 已就绪（${ready} 台${busy?`，${busy} 台工作中`:''}）· 现在提交约 2–3 分钟出片 · 闲置 ${keep} 分钟后释放`; }
+  else if(starting){ cls='starting'; text=`GPU 启动中（${starting} 台）· 约 4–5 分钟就绪${busy?`，${busy} 台工作中`:''}`; }
+  status.className=`lane-status ${cls}`; status.innerHTML=`<i></i>${text}`;
+  const full=pods.length>=(lane.max_pods||1);
+  button.disabled=full; button.textContent=full ? (lane.max_pods>1?`已达 ${lane.max_pods} 台上限`:'⚡ 已预热') : (pods.length?`⚡ 再预热 1 台（${pods.length}/${lane.max_pods}）`:'⚡ 预热 GPU');
+}
+async function loadLanes(){
+  try { laneState=await api('./api/lanes'); renderLane(); } catch(err) { /* lane state is advisory */ }
+}
+$('#warm-button').addEventListener('click', async ()=>{
+  const button=$('#warm-button'); button.disabled=true; const model=$('#model').value;
+  try { const result=await api(`./api/lanes/${encodeURIComponent(model)}/warm`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({count:(laneOf(model)?.pods?.length||0)+1})});
+    laneState.lanes=laneState.lanes.map(lane=>lane.model===result.lane.model?result.lane:lane); renderLane();
+    showToast(result.started.length ? '已开始预热，约 4–5 分钟就绪，这期间可以写提示词' : 'GPU 已经在线');
+  } catch(err) { showRequestError(err); renderLane(); }
+});
 async function loadTasks(silent=false) {
   try {
     const data = await api('./api/tasks'); state.tasks = data.tasks; renderTasks();
@@ -142,6 +169,8 @@ function syncModelCapabilities() {
   Array.from(resolution.options).forEach(option=>{
     if(option.textContent==='1080p')option.disabled=selfHosted;
     if(option.textContent==='768p')option.disabled=!h3;
+    // H3 is 768p only: the worker refuses any other short edge after a full cold start.
+    if(h3 && option.textContent!=='768p')option.disabled=true;
   });
   if(h3 && resolution.value!=='768p') resolution.value='768p';
   if(!h3 && resolution.value==='768p') resolution.value='720p';
@@ -192,11 +221,11 @@ $('#reference').addEventListener('change', event => {
 function clearReference(){ $('#reference').value=''; $('#reference-image').removeAttribute('src'); $('#reference-preview').hidden=true; $('#reference-guide').hidden=true; }
 $('#remove-reference').addEventListener('click', clearReference);
 $('#ratio').addEventListener('change', event => { const ratio=event.target.value; $('#ratio-icon').className=`ratio-icon ${['9:16','3:4'].includes(ratio)?'portrait':ratio==='1:1'?'square':'landscape'}`; });
-$('#model').addEventListener('change', syncModelCapabilities);
+$('#model').addEventListener('change', ()=>{ syncModelCapabilities(); renderLane(); });
 document.querySelectorAll('[data-prompt]').forEach(card => card.addEventListener('click', () => { $('#prompt').value=card.dataset.prompt; $('#prompt').dispatchEvent(new Event('input')); $('#prompt').focus(); window.scrollTo({top:0,behavior:'smooth'}); }));
 $('#new-task').addEventListener('click', resetComposer); $('#back-button').addEventListener('click', resetComposer);
 $('#sidebar-open').addEventListener('click', openSidebar); $('#sidebar-close').addEventListener('click', closeSidebar); $('#sidebar-scrim').addEventListener('click', closeSidebar);
 $('#error-close').addEventListener('click', closeError); $('#error-confirm').addEventListener('click', closeError); $('#error-dialog').addEventListener('click', event=>{if(event.target===$('#error-dialog'))closeError();});
 document.addEventListener('keydown', event=>{if(event.key==='Escape')closeError();});
 $('#logout').addEventListener('click', async()=>{ try{await api('./api/logout',{method:'POST'});}finally{location.href='./login';} });
-syncModelCapabilities(); loadTasks(); state.timer=setInterval(()=>loadTasks(true), 8000);
+syncModelCapabilities(); loadTasks(); loadLanes(); state.timer=setInterval(()=>{ loadTasks(true); loadLanes(); }, 8000);

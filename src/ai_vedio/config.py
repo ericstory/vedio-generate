@@ -107,6 +107,9 @@ class RunPodPodSettings:
     # terminal callback. Only enable for lanes whose worker image pulls jobs,
     # otherwise every job pays the idle window for nothing.
     keep_warm_idle_seconds: float = 0.0
+    # How many Pods the lane may run at once; the guard adds one per tick
+    # while queued tasks outnumber live Pods. 1 keeps the original behaviour.
+    max_pods: int = 1
     # A warm Pod stops taking new jobs and is deleted once idle after living
     # this long. A ceiling against a tracking bug, not a scheduling feature.
     max_pod_lifetime_seconds: float = 4 * 3600.0
@@ -285,6 +288,7 @@ def load_wan_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
             os.getenv("RUNPOD_WAN_POD_ACQUIRE_RETRY_SECONDS", "20")
         ),
         keep_warm_idle_seconds=float(os.getenv("RUNPOD_WAN_POD_KEEP_WARM_SECONDS", "0")),
+        max_pods=max(1, int(os.getenv("RUNPOD_WAN_POD_MAX_PODS", "1"))),
         max_pod_lifetime_seconds=float(
             os.getenv("RUNPOD_WAN_POD_MAX_LIFETIME_SECONDS", "14400")
         ),
@@ -351,6 +355,7 @@ def load_h3_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetting
             os.getenv("RUNPOD_H3_POD_ACQUIRE_RETRY_SECONDS", "20")
         ),
         keep_warm_idle_seconds=float(os.getenv("RUNPOD_H3_POD_KEEP_WARM_SECONDS", "0")),
+        max_pods=max(1, int(os.getenv("RUNPOD_H3_POD_MAX_PODS", "1"))),
         max_pod_lifetime_seconds=float(
             os.getenv("RUNPOD_H3_POD_MAX_LIFETIME_SECONDS", "14400")
         ),
@@ -433,6 +438,7 @@ def load_eros_pod_settings(env_file: str | Path | None = None) -> RunPodPodSetti
             os.getenv("RUNPOD_EROS_POD_ACQUIRE_RETRY_SECONDS", "20")
         ),
         keep_warm_idle_seconds=float(os.getenv("RUNPOD_EROS_POD_KEEP_WARM_SECONDS", "0")),
+        max_pods=max(1, int(os.getenv("RUNPOD_EROS_POD_MAX_PODS", "1"))),
         max_pod_lifetime_seconds=float(
             os.getenv("RUNPOD_EROS_POD_MAX_LIFETIME_SECONDS", "14400")
         ),
@@ -505,6 +511,7 @@ def load_ltx_pod_settings(env_file: str | Path | None = None) -> RunPodPodSettin
             os.getenv("RUNPOD_LTX_POD_ACQUIRE_RETRY_SECONDS", "20")
         ),
         keep_warm_idle_seconds=float(os.getenv("RUNPOD_LTX_POD_KEEP_WARM_SECONDS", "0")),
+        max_pods=max(1, int(os.getenv("RUNPOD_LTX_POD_MAX_PODS", "1"))),
         max_pod_lifetime_seconds=float(
             os.getenv("RUNPOD_LTX_POD_MAX_LIFETIME_SECONDS", "14400")
         ),

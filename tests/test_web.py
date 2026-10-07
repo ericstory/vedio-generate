@@ -1481,3 +1481,110 @@ def test_pod_job_input_carries_the_reference_for_fl2va() -> None:
     assert _reference_url_for(client, {"id": "t1", "has_reference": 1}) == client.reference_url("t1")
     assert _reference_url_for(client, {"id": "t1", "has_reference": 0}) == ""
     assert _reference_url_for(object(), {"id": "t1", "has_reference": 1}) == ""
+
+
+def test_terminal_task_is_not_revived_by_a_late_poll(tmp_path: Path) -> None:
+    """2026-10-07: a Pod poll raced the failure callback, put the task back to processing and lost its error."""
+    store = TaskStore(tmp_path / "tasks.db")
+    _processing_pod_task(store, "done", "pod-x")
+    store.update_remote("done", {"status": "failed", "content": {}, "error": "ValueError: short_edge must be 768"})
+    store.update_remote("done", {"status": "processing", "content": {"runtime_status": "running"}, "error": None})
+    task = store.get("done")
+    assert task and task["status"] == "failed" and "768" in task["error"]
+    # A terminal-to-terminal write (e.g. the guard expiring a failed row) is still allowed.
+    store.update_remote("done", {"status": "expired", "content": {}, "error": "gone"})
+    assert store.get("done")["status"] == "expired"
+
+
+def test_h3_refuses_anything_but_768p_before_spending_a_pod(tmp_path: Path) -> None:
+    settings = replace(web_settings(tmp_path), h3_enabled=True, eros_enabled=True, runpod_cost_guard_enabled=True)
+    with TestClient(create_app(settings)) as client:
+        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
+        for model in ("minimax-h3-pinkcherry", "minimax-h3-10eros"):
+            for resolution in ("480p", "720p"):
+                refused = client.post(
+                    "/generate/api/tasks",
+                    data={"prompt": "x", "model": model, "ratio": "16:9", "resolution": resolution, "duration": 5},
+                )
+                assert refused.status_code == 422, (model, resolution)
+                assert "768p" in refused.json()["detail"]
+
+
+class _WarmableLaneClient(_WarmLaneClient):
+    """Adds the warm-up creator; counts the Pods it started."""
+
+    def __init__(self, deleted: list[str], **settings):
+        super().__init__(deleted, **settings)
+        self.warmed: list[str] = []
+        self.created: list[dict] = []
+
+    def create_warm_pod(self, *, warm_id: str, **options):
+        pod_id = f"warm-{len(self.warmed) + 1}"
+        self.warmed.append(pod_id)
+        return {"id": pod_id, "status": "queued", "content": {"gpu_name": "RTX PRO 6000", "pod_price_per_hour": 2.09}, "error": None}
+
+    def create_text_video(self, **kwargs):
+        pod_id = f"job-{len(self.created) + 1}"
+        self.created.append(kwargs)
+        return {"id": pod_id, "status": "queued", "content": {}, "error": None}
+
+
+def test_warm_up_starts_an_idle_pod_that_reports_ready_once_it_polls(tmp_path: Path, monkeypatch) -> None:
+    deleted: list[str] = []
+    client_stub = _WarmableLaneClient(deleted)
+    _install_lane(monkeypatch, client_stub)
+    monkeypatch.setenv("RUNPOD_H3_POD_KEEP_WARM_SECONDS", "600")
+    monkeypatch.setenv("RUNPOD_H3_POD_MAX_PODS", "1")
+    settings = replace(web_settings(tmp_path), h3_enabled=True, runpod_cost_guard_enabled=True, video_upload_token="pod-token")
+    monkeypatch.setattr(web, "_runpod_cost_guard_tick", lambda *a, **k: False)
+    with TestClient(create_app(settings)) as client:
+        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
+        lanes = client.get("/generate/api/lanes").json()["lanes"]
+        assert [lane["model"] for lane in lanes] == ["minimax-h3-pinkcherry"]
+        assert lanes[0]["pods"] == [] and lanes[0]["max_pods"] == 1 and lanes[0]["keep_warm_seconds"] == 600
+        first = client.post("/generate/api/lanes/minimax-h3-pinkcherry/warm")
+        assert first.status_code == 200, first.text
+        assert first.json()["started"] == ["warm-1"]
+        assert first.json()["lane"]["pods"][0]["state"] == "starting"
+        store: TaskStore = client.app.state.store
+        pod = store.get_pod("warm-1")
+        assert pod["state"] == "idle" and pod["current_task_id"] is None and pod["metadata"]["warm"] is True
+        # Idempotent at the lane's Pod limit: nothing new is started.
+        again = client.post("/generate/api/lanes/minimax-h3-pinkcherry/warm", json={"count": 3})
+        assert again.status_code == 200 and again.json()["started"] == [] and client_stub.warmed == ["warm-1"]
+        # The worker comes up and asks for work: the lane is now ready.
+        polled = client.post("/generate/api/internal/pod-jobs/warm-1/next", headers={"Authorization": "Bearer pod-token"})
+        assert polled.status_code == 204
+        lane = client.get("/generate/api/lanes").json()["lanes"][0]
+        assert lane["pods"][0]["state"] == "ready" and lane["pods"][0]["worker_ready_at"]
+        # A queued task is handed to the warm worker instead of a new Pod.
+        created = client.post(
+            "/generate/api/tasks",
+            data={"prompt": "x", "model": "minimax-h3-pinkcherry", "ratio": "16:9", "resolution": "768p", "duration": 5},
+        )
+        assert created.status_code == 201
+        handed = client.post("/generate/api/internal/pod-jobs/warm-1/next", headers={"Authorization": "Bearer pod-token"})
+        assert handed.status_code == 200 and handed.json()["job"]["task_id"] == created.json()["task"]["id"]
+        assert client.get("/generate/api/lanes").json()["lanes"][0]["pods"][0]["state"] == "busy"
+        assert client_stub.created == []
+        refused = client.post("/generate/api/lanes/minimax-h3-10eros/warm")
+        assert refused.status_code == 503  # lane not enabled
+
+
+def test_guard_grows_the_lane_up_to_max_pods(tmp_path: Path, monkeypatch) -> None:
+    store = TaskStore(tmp_path / "tasks.db")
+    deleted: list[str] = []
+    client_stub = _WarmableLaneClient(deleted, max_pods=2)
+    _install_lane(monkeypatch, client_stub)
+    _processing_pod_task(store, "running-1", "pod-busy")
+    for task_id in ("q1", "q2", "q3"):
+        _queued_h3_task(store, task_id, created_at=datetime.now(timezone.utc).isoformat())
+    # One live Pod, three queued tasks, room for one more Pod: one is added per tick.
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    assert len(client_stub.created) == 1 and client_stub.created[0]["task_id"] == "q1"
+    assert {p["id"] for p in store.live_pods("runpod_h3_pod")} == {"pod-busy", "job-1"}
+    # At the limit the rest wait for a warm worker; no third Pod.
+    assert _runpod_cost_guard_tick(store, shutdown_if_idle=False) is True
+    assert len(client_stub.created) == 1
+    waiting = [web._progress_of(t) for t in store.pending_pod_tasks("runpod_h3_pod")]
+    assert [w["stage"] for w in waiting] == ["awaiting_worker", "awaiting_worker"]

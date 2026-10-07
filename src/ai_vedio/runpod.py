@@ -371,10 +371,38 @@ class RunPodPodClient:
         jobs_base_url = self.jobs_base_url()
         if jobs_base_url:
             pod_env["POD_JOBS_BASE_URL"] = jobs_base_url
+        return self._launch_pod(
+            name=f"{self.settings.name_prefix}-{task_id[:12]}", pod_env=pod_env, options=options
+        )
+
+    def create_warm_pod(self, *, warm_id: str, **options: Any) -> dict[str, Any]:
+        """Start a Pod with no job of its own: it downloads and loads the
+        weights, then pulls the lane queue like any warm worker. Needs
+        keep-warm on, otherwise there is no queue URL for it to ask."""
+        jobs_base_url = self.jobs_base_url()
+        if not jobs_base_url:
+            raise ValueError("warm-up Pods need keep-warm enabled on the lane")
+        template = self._request("GET", f"/templates/{self.settings.template_id}")
+        template_env = template.get("env") if isinstance(template.get("env"), dict) else {}
+        pod_env = {
+            **template_env,
+            "SMOKE_INPUT_JSON": "",
+            "POD_RESULT_CALLBACK_TOKEN": self.settings.callback_token,
+            "POD_JOBS_BASE_URL": jobs_base_url,
+        }
+        return self._launch_pod(
+            name=f"{self.settings.name_prefix}-warm-{warm_id[:8]}", pod_env=pod_env, options=options
+        )
+
+    def _launch_pod(self, *, name: str, pod_env: dict[str, str], options: dict[str, Any]) -> dict[str, Any]:
+        """Create one Pod from the lane template with this env: GPU candidates
+        in preference order, data centres in preference order, capacity misses
+        retried for ``capacity_retry_sweeps`` sweeps. Shared by the job Pods
+        and the warm-up Pods."""
         if self.settings.use_management_api_v1:
             # rp-migrate: keep-v1 start
             payload = {  # rp-migrate: keep-v1
-                "name": f"{self.settings.name_prefix}-{task_id[:12]}",
+                "name": name,
                 "templateId": self.settings.template_id,
                 "cloudType": "SECURE",
                 "computeType": "GPU",
@@ -392,7 +420,7 @@ class RunPodPodClient:
         else:
             # rp-migrate: ignore start
             payload = {
-                "name": f"{self.settings.name_prefix}-{task_id[:12]}",
+                "name": name,
                 "templateId": self.settings.template_id,
                 "cloud": "SECURE",
                 "gpu": {
@@ -556,7 +584,7 @@ class RunPodPodClient:
         status = "processing" if runtime in {"running", "initializing", "created"} else "queued"
         # RunPod sometimes creates the Pod, assigns a host and then kills it a
         # second later ("Exited by Runpod"); the record stays, so a 404 check
-        # never fires and the row would sit until the runtime cap. Surface it.
-        if runtime in {"exited", "terminated", "dead"}:
-            status = "exited"
+        # never fires and the row would sit until the runtime cap. The raw
+        # runtime state travels in content so the guard can see "exited"
+        # without this status ever leaking into a task row.
         return {"id": pod_id, "status": status, "content": {"runtime_status": runtime}, "error": None}

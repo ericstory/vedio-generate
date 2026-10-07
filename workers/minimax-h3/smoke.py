@@ -164,15 +164,31 @@ def pull_jobs(url: str, token: str, run: Callable[[str, dict], bool], *, sleep=t
             return
 
 
+def warm_up() -> None:
+    """A Pod started without a job: get the weights down and loaded now, so
+    the first job that is pulled skips straight to inference."""
+    import handler as worker
+
+    started = time.monotonic()
+    worker.ensure_models()
+    worker._generator()
+    print(json.dumps({"event": "warm_ready", "seconds": round(time.monotonic() - started, 1)}), flush=True)
+
+
 def main() -> None:
     raw_input = os.environ.get("SMOKE_INPUT_JSON", "").strip()
-    if not raw_input:
-        raise RuntimeError("SMOKE_INPUT_JSON is required")
-    params = json.loads(raw_input)
     _tee_process_output()
+    url = jobs_url()
+    if not raw_input:
+        if not url:
+            raise RuntimeError("SMOKE_INPUT_JSON is required unless the Pod pulls jobs")
+        warm_up()
+        pull_jobs(url, os.environ.get("POD_RESULT_CALLBACK_TOKEN", ""), run_job)
+        _await_deletion()
+        return
+    params = json.loads(raw_input)
     if not run_job("h3-pod-smoke", params):
         _await_deletion()
-    url = jobs_url()
     if url and os.environ.get("POD_RESULT_CALLBACK_URL", "").strip():
         # The model is loaded and paid for; take the queue while it is warm.
         pull_jobs(url, os.environ.get("POD_RESULT_CALLBACK_TOKEN", ""), run_job)
