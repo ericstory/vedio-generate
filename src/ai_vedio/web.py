@@ -31,6 +31,7 @@ from .capabilities import (
     SELF_HOSTED_MODELS,
     SELF_HOSTED_PROVIDERS,
     SUPPORTED_MODELS,
+    RETIRED_MODELS,
 )
 from .config import (
     PROJECT_ROOT,
@@ -1472,10 +1473,10 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
     async def create_task(
         request: Request,
         prompt: str = Form(...),
-        model: str = Form("seedance-2.0"),
+        model: str = Form("minimax-h3-pinkcherry"),
         ratio: str = Form("16:9"),
-        resolution: str = Form("720p"),
-        duration: int = Form(6),
+        resolution: str = Form("768p"),
+        duration: int = Form(5),
         generate_audio: bool = Form(True),
         reference: UploadFile | None = File(None),
     ):
@@ -1485,6 +1486,10 @@ def create_app(web_settings: WebSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="提示词长度应为 1–3000 个字符")
         if model not in SUPPORTED_MODELS:
             raise HTTPException(status_code=422, detail="生成模型不受支持")
+        if model in RETIRED_MODELS:
+            raise HTTPException(
+                status_code=410, detail="该模型已下线，现在只提供 MiniMax H3 + PinkCherry 和 MiniMax H3 + 10Eros Max"
+            )
         if ratio not in ALLOWED_RATIOS or resolution not in ALLOWED_RESOLUTIONS or duration not in ALLOWED_DURATIONS:
             raise HTTPException(status_code=422, detail="视频参数不受支持")
         is_self_hosted = model in SELF_HOSTED_MODELS

@@ -31,16 +31,16 @@ def test_frontend_exposes_all_supported_models() -> None:
     ).read_text(encoding="utf-8")
     assert 'select name="model" id="model"' in markup
     assert 'type="hidden" name="model"' not in markup
-    for model in (
-        "minimax-h3-pinkcherry",
-        "wan-2.2-a14b-adult-v2",
-        "pinkcherry-ltx-2.3-v1.8",
-        "seedance-2.5",
-        "seedance-2-mini",
-        "seedance-2-fast",
-        "seedance-2.0",
-    ):
+    from ai_vedio.capabilities import ACTIVE_MODELS, RETIRED_MODELS
+
+    assert ACTIVE_MODELS == ("minimax-h3-pinkcherry", "minimax-h3-10eros")
+    for model in ACTIVE_MODELS:
         assert f'value="{model}"' in markup
+    # Retired on 2026-10-07: history still renders them, the menu must not offer them.
+    for model in RETIRED_MODELS:
+        assert f'value="{model}"' not in markup
+    assert 'value="minimax-h3-pinkcherry" selected' in markup
+    assert "Seedance" not in markup
 
 
 def test_frontend_switches_self_hosted_capabilities() -> None:

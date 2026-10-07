@@ -23,6 +23,19 @@ SUPPORTED_MODELS = (
     "seedance-2.0",
 )
 
+# Taken off the menu on 2026-10-07 (user decision: only the two MiniMax H3
+# NSFW lanes stay). They remain in SUPPORTED_MODELS so historical rows still
+# render and their providers still resolve, but create_task refuses them.
+RETIRED_MODELS = frozenset({
+    "wan-2.2-a14b-adult-v2",
+    "pinkcherry-ltx-2.3-v1.8",
+    "seedance-2.5",
+    "seedance-2-mini",
+    "seedance-2-fast",
+    "seedance-2.0",
+})
+ACTIVE_MODELS = tuple(model for model in SUPPORTED_MODELS if model not in RETIRED_MODELS)
+
 SELF_HOSTED_MODELS = frozenset({
     "pinkcherry-ltx-2.3-v1.8",
     "wan-2.2-a14b-adult-v2",

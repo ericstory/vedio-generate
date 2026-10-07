@@ -1061,3 +1061,9 @@ no_proxy='*' python3 scripts/runpod/cleanup_runpod.py --retire-wan-ltx --yes    
 
 验收标准：`pytest` 全过；`railway up` 后 healthz 200；网页只剩 H3 + 10Eros + Seedance；历史 Wan/LTX 任务在列表里仍能打开视频；
 守卫循环日志里不再出现 wan/ltx 链路。
+
+## 二十、2026-10-07：恢复生产 + 菜单只留两条 H3 链路
+
+- **停摆根因**：模板上的 GHCR 注册表凭据 `cmtgxws1c003d14njrtc07zd2` 过期，RunPod 拉镜像 `IMAGE_AUTH_ERROR … denied`，Pod 建出 1 秒即 "Exited by Runpod"（REST GET 返回 EXITED 而非 404，守卫认不出，空等 30 分钟）。镜像匿名可拉，已 `PATCH /v1/templates/{id} {"containerRegistryAuthId":""}` 清掉两个现役模板的凭据；建模板脚本不再传 `registry`。另：账户余额曾为负（两个停机的 musetalk Pod 持续计盘费），已删。**RunPod 控制台 Inbox 直接写出 Pod 初始化错误，排查秒退先看那里。**
+- **代码**（提交 `419ed33`，部署 `697f70c7`）：`get_task` 识别 EXITED；`_tend_pod_lane` 删死 Pod 并 `requeue_without_pod` 重排队，`POD_EXIT_RETRY_LIMIT=2` 次后 failed。验收：10Eros 768p/5s 冷启动拿 GPU 1.5 s、下权重 110 s、加载 71 s、推理 274 s、峰值 30 GB，抽帧真实画面。
+- **菜单下线**（本节提交）：`capabilities.RETIRED_MODELS` = Wan、LTX、四个 Seedance；仍在 `SUPPORTED_MODELS` 里让历史任务正常渲染，`create_task` 对它们返回 410。`index.html` 只剩两个 H3 选项，默认 PinkCherry + 768p + 5 秒。第十九节的全量代码移除仍待做，本节只是用户可见面的下线。

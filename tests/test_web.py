@@ -240,32 +240,24 @@ def test_wan_pod_progress_ignores_terminal_tasks(tmp_path: Path) -> None:
     assert task and "progress" not in (task.get("provider_metadata") or {})
 
 
-def test_wan_720p_duration_cap_rejected_before_provider(tmp_path: Path, monkeypatch) -> None:
-    settings = replace(web_settings(tmp_path), wan_v2_enabled=True)
-    app = create_app(settings)
+def test_retired_models_are_off_the_menu_and_refused(tmp_path: Path) -> None:
+    """2026-10-07: only the two MiniMax H3 lanes stay. History rows still render."""
+    from ai_vedio.capabilities import RETIRED_MODELS
 
-    def explode(*args, **kwargs):
-        raise AssertionError("provider must not be called for an over-budget combo")
-
-    monkeypatch.setattr(web, "_provider_client", explode)
-    with TestClient(app) as client:
+    with TestClient(create_app(web_settings(tmp_path))) as client:
         client.post(
             "/generate/api/login",
-            json={"username": settings.username, "password": settings.password},
+            json={"username": "admin", "password": "correct horse battery staple"},
         )
-        response = client.post(
-            "/generate/api/tasks",
-            data={
-                "prompt": "海边日出",
-                "model": "wan-2.2-a14b-adult-v2",
-                "ratio": "16:9",
-                "resolution": "720p",
-                "duration": "12",
-                "generate_audio": "true",
-            },
-        )
-    assert response.status_code == 422
-    assert "10 秒" in response.json()["detail"]
+        page = client.get("/generate")
+        for model in RETIRED_MODELS:
+            assert f'value="{model}"' not in page.text
+            refused = client.post(
+                "/generate/api/tasks",
+                data={"prompt": "测试", "model": model, "resolution": "720p", "duration": 5},
+            )
+            assert refused.status_code == 410, model
+            assert "已下线" in refused.json()["detail"]
 
 
 def test_task_store_orders_newest_first(tmp_path: Path) -> None:
@@ -424,113 +416,6 @@ def test_task_creation_rejects_unknown_model_before_calling_provider(
     assert response.json()["detail"] == "生成模型不受支持"
 
 
-def test_self_hosted_task_uses_independent_provider_ids(tmp_path: Path, monkeypatch) -> None:
-    class FakeRunPod:
-        def create_text_video(self, **kwargs):
-            assert kwargs["model"] == "pinkcherry-ltx-2.3-v1.8"
-            return {"id": "runpod-job-123", "status": "queued"}
-
-    def provider_client(provider: str):
-        assert provider == "runpod"
-        yield FakeRunPod()
-
-    monkeypatch.setattr(web, "_provider_client", provider_client)
-    app = create_app(web_settings(tmp_path))
-    with TestClient(app) as client:
-        client.post(
-            "/generate/api/login",
-            json={"username": "admin", "password": "correct horse battery staple"},
-        )
-        response = client.post(
-            "/generate/api/tasks",
-            data={"prompt": "电影感城市夜景", "model": "pinkcherry-ltx-2.3-v1.8"},
-        )
-    assert response.status_code == 201
-    task = response.json()["task"]
-    assert task["id"] != "runpod-job-123"
-    assert task["provider"] == "runpod"
-    assert task["provider_task_id"] == "runpod-job-123"
-
-
-def test_self_hosted_task_rejects_reference_before_provider(tmp_path: Path, monkeypatch) -> None:
-    def provider_must_not_be_called(provider: str):
-        raise AssertionError(f"provider {provider} should not be called")
-
-    monkeypatch.setattr(web, "_provider_client", provider_must_not_be_called)
-    app = create_app(web_settings(tmp_path))
-    with TestClient(app) as client:
-        client.post(
-            "/generate/api/login",
-            json={"username": "admin", "password": "correct horse battery staple"},
-        )
-        response = client.post(
-            "/generate/api/tasks",
-            data={"prompt": "测试", "model": "pinkcherry-ltx-2.3-v1.8"},
-            files={"reference": ("test.png", b"png", "image/png")},
-        )
-    assert response.status_code == 422
-    assert response.json()["detail"] == "自建模型首版暂不支持参考图"
-
-
-def test_wan_v2_uses_independent_provider_with_long_audio_video(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    class FakeWan:
-        def create_text_video(self, **kwargs):
-            assert kwargs["model"] == "wan-2.2-a14b-adult-v2"
-            assert kwargs["duration"] == 15
-            assert kwargs["ratio"] == "21:9"
-            assert kwargs["generate_audio"] is True
-            assert kwargs["task_id"]
-            return {"id": "wan-job-123", "status": "queued"}
-
-    def provider_client(provider: str):
-        assert provider == "runpod_wan_pod"
-        yield FakeWan()
-
-    monkeypatch.setattr(web, "_provider_client", provider_client)
-    settings = replace(web_settings(tmp_path), wan_v2_enabled=True)
-    app = create_app(settings)
-    with TestClient(app) as client:
-        client.post(
-            "/generate/api/login",
-            json={"username": "admin", "password": "correct horse battery staple"},
-        )
-        response = client.post(
-            "/generate/api/tasks",
-            data={
-                "prompt": "电影感测试",
-                "model": "wan-2.2-a14b-adult-v2",
-                "duration": "15",
-                "resolution": "480p",
-                "ratio": "21:9",
-                "generate_audio": "true",
-            },
-        )
-    assert response.status_code == 201
-    assert response.json()["task"]["provider"] == "runpod_wan_pod"
-
-
-def test_wan_v2_is_hidden_and_rejected_until_enabled(tmp_path: Path) -> None:
-    app = create_app(web_settings(tmp_path))
-    with TestClient(app) as client:
-        client.post(
-            "/generate/api/login",
-            json={"username": "admin", "password": "correct horse battery staple"},
-        )
-        page = client.get("/generate")
-        assert 'value="wan-2.2-a14b-adult-v2" disabled' in page.text
-        response = client.post(
-            "/generate/api/tasks",
-            data={
-                "prompt": "测试",
-                "model": "wan-2.2-a14b-adult-v2",
-                "duration": "5",
-            },
-        )
-    assert response.status_code == 503
-
-
 def test_completed_task_accepts_quality_vote(tmp_path: Path) -> None:
     settings = web_settings(tmp_path)
     store = TaskStore(settings.database_path)
@@ -656,9 +541,10 @@ def test_h3_lane_is_flag_gated_and_owns_768p(tmp_path: Path) -> None:
                 "duration": 5,
             },
         )
-        assert wrong_lane.status_code == 422
+        # Seedance is retired, so the 768p ownership check is never reached.
+        assert wrong_lane.status_code == 410
         page = client.get("/generate")
-        assert 'value="minimax-h3-pinkcherry" disabled' in page.text
+        assert 'value="minimax-h3-pinkcherry" selected disabled' in page.text
 
 
 def _pod_settings(**overrides):
@@ -703,51 +589,6 @@ def _capacity_error() -> RunPodError:
         "title": "Bad Request",
     }
     return RunPodError(f"RunPod Pod API HTTP 400: {body}", status_code=400, error=body)
-
-
-def test_ltx_routes_to_the_pod_lane_only_when_flagged(tmp_path: Path, monkeypatch) -> None:
-    """Flag off keeps the serverless endpoint; flag on queues LTX like the other Pod lanes."""
-    calls: list[str] = []
-
-    class FakeServerless:
-        def create_text_video(self, **kwargs):
-            calls.append(kwargs["model"])
-            return {"id": "remote-ltx", "status": "queued", "content": {}, "error": None}
-
-    def serverless_factory():
-        yield FakeServerless()
-
-    def pod_factory(provider: str):
-        raise AssertionError(f"Pod lane {provider} must not be asked for a client during the request")
-
-    monkeypatch.setattr(web, "_runpod_client", serverless_factory)
-    monkeypatch.setattr(web, "_runpod_cost_guard_tick", lambda store, shutdown_if_idle: False)
-    base = replace(
-        web_settings(tmp_path), runpod_cost_guard_enabled=True, runpod_cost_guard_poll_seconds=3600,
-    )
-    form = {"prompt": "long-form fallback", "model": "pinkcherry-ltx-2.3-v1.8", "resolution": "480p", "duration": 12}
-
-    with TestClient(create_app(replace(base, ltx_pod_enabled=False))) as client:
-        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
-        response = client.post("/generate/api/tasks", data=form)
-        assert response.status_code == 201
-        task = response.json()["task"]
-        assert task["provider"] == "runpod"
-        assert task["provider_task_id"] == "remote-ltx"
-        assert calls == ["pinkcherry-ltx-2.3-v1.8"]
-
-    monkeypatch.setattr(web, "_provider_client", pod_factory)
-    with TestClient(create_app(replace(base, ltx_pod_enabled=True, database_path=tmp_path / "ltx-pod.db"))) as client:
-        client.post("/generate/api/login", json={"username": "admin", "password": "correct horse battery staple"})
-        response = client.post("/generate/api/tasks", data=form)
-        assert response.status_code == 201
-        task = response.json()["task"]
-        assert task["provider"] == "runpod_ltx_pod"
-        assert task["provider_task_id"] == ""
-        assert task["provider_metadata"]["progress"]["stage"] == "awaiting_gpu"
-        # The other lanes are untouched by the flag.
-        assert web._provider_for("minimax-h3-pinkcherry", replace(base, ltx_pod_enabled=True)) == "runpod_h3_pod"
-        assert web._provider_for("seedance-2.5", replace(base, ltx_pod_enabled=True)) == "seedance"
 
 
 def test_ltx_pod_callback_commits_result_and_deletes_billed_pod(tmp_path: Path, monkeypatch) -> None:
